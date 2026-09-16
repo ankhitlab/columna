@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>columna WebGPU bench</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1a1f16;
+        --muted: #5c6754;
+        --bg: #eef2e8;
+        --panel: #f7faf3;
+        --accent: #2f6f4e;
+        --line: #c9d2bf;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(ellipse 80% 50% at 10% -10%, #d7e6d0 0%, transparent 55%),
+          radial-gradient(ellipse 60% 40% at 100% 0%, #cfe0d8 0%, transparent 50%),
+          var(--bg);
+        color: var(--ink);
+      }
+      main {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 48px 24px 64px;
+      }
+      h1 {
+        font-family: "IBM Plex Serif", Georgia, serif;
+        font-weight: 600;
+        font-size: 2.4rem;
+        margin: 0 0 8px;
+        letter-spacing: -0.02em;
+      }
+      p {
+        color: var(--muted);
+        margin: 0 0 24px;
+        max-width: 42rem;
+        line-height: 1.5;
+      }
+      button {
+        appearance: none;
+        border: 0;
+        background: var(--accent);
+        color: #f4fff8;
+        font: inherit;
+        font-weight: 600;
+        padding: 12px 20px;
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(1.05);
+      }
+      pre {
+        margin-top: 20px;
+        padding: 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        overflow: auto;
+        font-family: "IBM Plex Mono", Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+      }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Serif:wght@600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <main>
+      <h1>columna</h1>
+      <p>
+        Browser WebGPU micro-bench: numeric AND-filter, map, and filter→groupby pipeline versus CPU.
+        Requires Chrome/Edge with WebGPU.
+      </p>
+      <button id="run" type="button">Run bench</button>
+      <pre id="log">Ready.</pre>
+      <pre id="json"></pre>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

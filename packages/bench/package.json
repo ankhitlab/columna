@@ -1,0 +1,27 @@
+{
+  "name": "@columna/bench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "bench": "tsx src/bench.ts",
+    "compare": "tsx src/run-compare.ts",
+    "compare:columna": "tsx src/compare-columna.ts",
+    "compare:python": "py -3 python/compare.py",
+    "webgpu": "vite --config vite.config.ts",
+    "stats": "node --expose-gc --max-old-space-size=8192 --import tsx src/stats-bench.ts",
+    "stats:verify": "node --import tsx src/stats-verify.ts",
+    "stats:pandas": "py -3 python/stats_compare.py",
+    "advanced": "node --max-old-space-size=8192 --import tsx src/advanced-bench.ts",
+    "advanced:python": "py -3 python/advanced_compare.py",
+    "advanced:report": "node --import tsx src/advanced-report.ts",
+    "advanced:convergence": "node --import tsx src/advanced-convergence.ts && py -3 python/advanced_convergence.py"
+  },
+  "dependencies": {
+    "columna": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "vite": "^6.0.3"
+  }
+}

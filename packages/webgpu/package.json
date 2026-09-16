@@ -1,0 +1,33 @@
+{
+  "name": "@columna/webgpu",
+  "private": true,
+  "version": "0.1.0",
+  "description": "WebGPU compute backend for columna",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "clean": "rimraf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@columna/arrow": "workspace:*",
+    "@columna/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.51",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

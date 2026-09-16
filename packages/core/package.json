@@ -1,0 +1,57 @@
+{
+  "name": "@columna/core",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Fluent DataFrame API and expression DSL for columna",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --external pg --external mssql --external @clickhouse/client --external mysql2 --external better-sqlite3 --external kafkajs",
+    "clean": "rimraf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@columna/arrow": "workspace:*",
+    "@columna/runtime": "workspace:*",
+    "hyparquet": "^1.30.0",
+    "hyparquet-compressors": "^1.1.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "peerDependencies": {
+    "@clickhouse/client": "^1.8.0",
+    "better-sqlite3": "^11.0.0",
+    "kafkajs": "^2.2.0",
+    "mssql": "^11.0.0",
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.0"
+  },
+  "peerDependenciesMeta": {
+    "@clickhouse/client": { "optional": true },
+    "better-sqlite3": { "optional": true },
+    "kafkajs": { "optional": true },
+    "mssql": { "optional": true },
+    "mysql2": { "optional": true },
+    "pg": { "optional": true }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

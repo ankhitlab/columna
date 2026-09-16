@@ -1,0 +1,34 @@
+{
+  "name": "@columna/wasm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "WASM compute backend for columna",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "pkg"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build:rust": "cd rust && wasm-pack build --target nodejs --out-dir ../pkg",
+    "build:rust:bundler": "cd rust && wasm-pack build --target bundler --out-dir ../pkg-bundler",
+    "clean": "rimraf dist pkg",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@columna/arrow": "workspace:*",
+    "@columna/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

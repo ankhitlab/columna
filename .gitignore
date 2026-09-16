@@ -1,0 +1,49 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+*.tsbuildinfo
+target
+pkg
+pkg-bundler
+*.node
+
+# Test / coverage
+coverage
+
+# Caches
+.turbo
+.vite
+.cache
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Benchmark result dumps (keep .gitkeep)
+packages/bench/results/*.json
+!packages/bench/results/.gitkeep
+
+# Local npm name-research / claim scratch (not for public repo)
+_npm-free.txt
+_npm-taken.txt
+_npm-name-check.json
+_columna-claim/
+_dfkit-claim/
+
+# Pack artifacts
+*.tgz

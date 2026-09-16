@@ -1,0 +1,37 @@
+{
+  "name": "@columna/native",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Native Rayon kernels for columna (Node)",
+  "license": "MIT",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "*.node"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "clean": "rimraf *.node"
+  },
+  "napi": {
+    "name": "columna_native",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "name": "columna",
+  "version": "0.1.0",
+  "description": "Fluent DataFrame for TypeScript with WASM and WebGPU",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js",
+      "require": "./dist/core.cjs"
+    },
+    "./advanced": {
+      "types": "./dist/advanced.d.ts",
+      "import": "./dist/advanced.js",
+      "require": "./dist/advanced.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/index.cjs",
+    "./dist/advanced.js",
+    "./dist/advanced.cjs"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rimraf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "node ./scripts/prepack.mjs",
+    "postpack": "node ./scripts/postpack.mjs",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "dataframe",
+    "typescript",
+    "analytics",
+    "webgpu",
+    "wasm",
+    "pandas",
+    "polars",
+    "arrow"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "hyparquet": "^1.30.0",
+    "hyparquet-compressors": "^1.1.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "peerDependencies": {
+    "@clickhouse/client": "^1.8.0",
+    "better-sqlite3": "^11.0.0",
+    "kafkajs": "^2.2.0",
+    "mssql": "^11.0.0",
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.0"
+  },
+  "peerDependenciesMeta": {
+    "@clickhouse/client": {
+      "optional": true
+    },
+    "better-sqlite3": {
+      "optional": true
+    },
+    "kafkajs": {
+      "optional": true
+    },
+    "mssql": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@columna/advanced": "workspace:*",
+    "@columna/arrow": "workspace:*",
+    "@columna/core": "workspace:*",
+    "@columna/runtime": "workspace:*",
+    "@columna/wasm": "workspace:*",
+    "@columna/webgpu": "workspace:*",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  },
+  "directories": {
+    "test": "tests"
+  },
+  "author": ""
+}
