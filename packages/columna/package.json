@@ -44,6 +44,14 @@
     "postpack": "node ./scripts/postpack.mjs",
     "prepublishOnly": "pnpm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ankhitlab/columna.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ankhitlab/columna/issues"
+  },
+  "homepage": "https://github.com/ankhitlab/columna#readme",
   "keywords": [
     "dataframe",
     "typescript",

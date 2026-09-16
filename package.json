@@ -3,6 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "description": "Fluent DataFrame library for TypeScript with WASM and WebGPU backends",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ankhitlab/columna.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ankhitlab/columna/issues"
+  },
+  "homepage": "https://github.com/ankhitlab/columna#readme",
   "license": "MIT",
   "type": "module",
   "scripts": {
