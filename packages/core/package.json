@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm,cjs --dts --clean --external pg --external mssql --external @clickhouse/client --external mysql2 --external better-sqlite3 --external kafkajs",
     "clean": "rimraf dist",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json"
   },
   "dependencies": {
     "@columna/arrow": "workspace:*",

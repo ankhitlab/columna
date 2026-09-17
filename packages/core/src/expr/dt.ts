@@ -1,35 +1,35 @@
 import type { DtOp } from '@columna/runtime'
-import { Expr } from '../expr.js'
+import { Expr, type AnyExpr } from '../expr.js'
 
 export class DtNamespace {
-  constructor(private readonly expr: Expr) {}
+  constructor(private readonly expr: AnyExpr) {}
 
-  year(): Expr {
+  year(): Expr<number> {
     return this.op('year')
   }
-  month(): Expr {
+  month(): Expr<number> {
     return this.op('month')
   }
-  day(): Expr {
+  day(): Expr<number> {
     return this.op('day')
   }
-  hour(): Expr {
+  hour(): Expr<number> {
     return this.op('hour')
   }
-  minute(): Expr {
+  minute(): Expr<number> {
     return this.op('minute')
   }
-  second(): Expr {
+  second(): Expr<number> {
     return this.op('second')
   }
-  weekday(): Expr {
+  weekday(): Expr<number> {
     return this.op('weekday')
   }
-  epochMillis(): Expr {
+  epochMillis(): Expr<number> {
     return this.op('epochMillis')
   }
 
-  private op(op: DtOp): Expr {
+  private op(op: DtOp): Expr<number> {
     return new Expr({ type: 'dt', op, expr: this.expr.node })
   }
 }

@@ -25,6 +25,8 @@
     "bench:stats": "pnpm --filter @columna/bench run stats && pnpm --filter @columna/bench run stats:pandas && pnpm --filter @columna/bench run stats:verify",
     "studio": "pnpm --filter columna-studio dev",
     "clean": "pnpm -r run clean",
+    "bench:compare:js": "pnpm --filter @columna/bench run compare:js",
+    "bench:e2e": "pnpm --filter @columna/bench run e2e",
     "bench:advanced": "pnpm --filter @columna/bench run advanced && pnpm --filter @columna/bench run advanced:python && pnpm --filter @columna/bench run advanced:report"
   },
   "devDependencies": {

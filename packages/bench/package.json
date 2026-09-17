@@ -13,6 +13,8 @@
     "stats:verify": "node --import tsx src/stats-verify.ts",
     "stats:pandas": "py -3 python/stats_compare.py",
     "advanced": "node --max-old-space-size=8192 --import tsx src/advanced-bench.ts",
+    "e2e": "node --max-old-space-size=8192 --import tsx src/e2e-bench.ts",
+    "compare:js": "node --max-old-space-size=8192 --import tsx src/compare-js.ts",
     "advanced:python": "py -3 python/advanced_compare.py",
     "advanced:report": "node --import tsx src/advanced-report.ts",
     "advanced:convergence": "node --import tsx src/advanced-convergence.ts && py -3 python/advanced_convergence.py"
@@ -21,7 +23,13 @@
     "columna": "workspace:*"
   },
   "devDependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev57.0",
+    "apache-arrow": "^21.2.0",
+    "arquero": "^8.0.3",
+    "duckdb": "^1.4.4",
+    "nodejs-polars": "^0.26.1",
     "tsx": "^4.19.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "web-worker": "^1.5.0"
   }
 }

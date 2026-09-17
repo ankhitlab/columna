@@ -20,6 +20,8 @@ export function resolveFlatten(flatten: boolean | KafkaFlattenOptions | undefine
  * Flatten nested plain objects into dotted keys.
  * Arrays become JSON strings unless `arrays: true` (then `arr.0`, `arr.1`, …).
  */
+import { setRowField } from '@columna/arrow'
+
 export function flattenObject(
   input: unknown,
   config: FlattenConfig,
@@ -28,22 +30,22 @@ export function flattenObject(
   out: Record<string, unknown> = {},
 ): Record<string, unknown> {
   if (input === null || input === undefined) {
-    if (prefix) out[prefix] = null
+    if (prefix) setRowField(out, prefix, null)
     return out
   }
 
   if (depth >= config.maxDepth) {
-    out[prefix || 'value'] = stableJson(input)
+    setRowField(out, prefix || 'value', stableJson(input))
     return out
   }
 
   if (Array.isArray(input)) {
     if (!config.arrays) {
-      out[prefix || 'value'] = stableJson(input)
+      setRowField(out, prefix || 'value', stableJson(input))
       return out
     }
     if (input.length === 0) {
-      out[prefix || 'value'] = null
+      setRowField(out, prefix || 'value', null)
       return out
     }
     for (let i = 0; i < input.length; i++) {
@@ -56,7 +58,7 @@ export function flattenObject(
   if (isPlainObject(input)) {
     const entries = Object.entries(input)
     if (entries.length === 0) {
-      if (prefix) out[prefix] = null
+      if (prefix) setRowField(out, prefix, null)
       return out
     }
     for (const [k, v] of entries) {
@@ -66,7 +68,7 @@ export function flattenObject(
     return out
   }
 
-  out[prefix || 'value'] = normalizeLeaf(input)
+  setRowField(out, prefix || 'value', normalizeLeaf(input))
   return out
 }
 

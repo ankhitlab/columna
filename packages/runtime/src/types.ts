@@ -242,11 +242,74 @@ export interface BackendCapabilities {
   minRows?: number
 }
 
+/** One executed plan node (or kernel) as reported by the backend that ran it. */
+export interface ExecutionEvent {
+  /** Plan node type, e.g. "filter", "groupBy". */
+  node: string
+  /** Backend that actually did the work for this node. */
+  backend: EngineKind
+  /** Named kernel when one applied (e.g. "rust:filterAnd2I32F64", "gpu:filter", "native:parallelGather"). */
+  kernel?: string
+  /** Why the requested backend did not handle this node (set when `backend` differs from the requested engine). */
+  reason?: string
+  /** Wall time of the node, ms (best effort; nested nodes overlap). */
+  ms?: number
+  /** For GPU nodes: host↔device transfer vs. shader time, ms. */
+  transferMs?: number
+  computeMs?: number
+  rows?: number
+}
+
+/** What actually ran, as opposed to what `explain()` planned. */
+export interface ExecutionReport {
+  requested: EngineKind
+  /** Backend the runtime dispatched the plan to. */
+  dispatched: EngineKind
+  strict: boolean
+  events: ExecutionEvent[]
+  /** Whole-plan fallbacks performed by the runtime (backend threw or declined). */
+  fallbacks: Array<{ from: EngineKind; to: EngineKind; reason: string }>
+  totalMs: number
+  /** Distinct backends that executed at least one node. */
+  backendsUsed: EngineKind[]
+}
+
+/** Per-execution context handed to backends: records events; `strict` forbids silent delegation. */
+export interface ExecContext {
+  readonly requested: EngineKind
+  readonly strict: boolean
+  trace(event: ExecutionEvent): void
+}
+
+export class EngineStrictError extends Error {
+  constructor(
+    readonly engine: EngineKind,
+    readonly reasons: string[],
+  ) {
+    super(`engine "${engine}" (strict): ${reasons.join('; ') || 'no kernel of this engine executed'}`)
+    this.name = 'EngineStrictError'
+  }
+}
+
+export function formatExecutionReport(r: ExecutionReport): string {
+  const lines = [
+    `requested: ${r.requested}${r.strict ? ' (strict)' : ''} · dispatched: ${r.dispatched} · used: ${r.backendsUsed.join(', ') || '—'} · ${r.totalMs.toFixed(1)} ms`,
+  ]
+  for (const f of r.fallbacks) lines.push(`  fallback ${f.from} → ${f.to}: ${f.reason}`)
+  for (const e of r.events) {
+    const t = e.ms !== undefined ? ` ${e.ms.toFixed(1)} ms` : ''
+    const gpu = e.transferMs !== undefined || e.computeMs !== undefined ? ` (transfer ${(e.transferMs ?? 0).toFixed(1)} / compute ${(e.computeMs ?? 0).toFixed(1)} ms)` : ''
+    lines.push(`  ${e.node}: ${e.backend}${e.kernel ? ` [${e.kernel}]` : ''}${t}${gpu}${e.rows !== undefined ? ` rows=${e.rows}` : ''}${e.reason ? ` — ${e.reason}` : ''}`)
+  }
+  return lines.join('\n')
+}
+
 export interface Backend {
   readonly name: EngineKind
   readonly capabilities: BackendCapabilities
   supports(plan: PlanNode): boolean
-  execute(plan: PlanNode): Promise<TableView> | TableView
+  /** `ctx` is optional for backward compatibility; backends that receive it should trace what they run. */
+  execute(plan: PlanNode, ctx?: ExecContext): Promise<TableView> | TableView
 }
 
 export interface RuntimeOptions {
@@ -254,6 +317,12 @@ export interface RuntimeOptions {
   webgpuMinRows?: number
   wasmMinRows?: number
   preferGpu?: boolean
+  /**
+   * Strict engine selection: the requested engine must execute the plan itself. Any runtime fallback
+   * (backend throws, plan unsupported) or a backend that delegates every node to another engine raises
+   * `EngineStrictError` with the reasons instead of silently running elsewhere.
+   */
+  strict?: boolean
 }
 
 export const DEFAULT_WEBGPU_MIN_ROWS = 10_000

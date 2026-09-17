@@ -386,21 +386,34 @@ export function setValue(data: TypedData, index: number, value: number | string 
     ;(data as Uint8Array)[index] = value ? 1 : 0
     return
   }
-  ;(data as Float64Array | Float32Array | Int32Array | Uint32Array)[index] = Number(value)
+  const n = Number(value)
+  if (dtype === 'i32') {
+    if (!Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
+      throw new RangeError(`Cannot store ${String(value)} in i32 (need integer in Int32 range)`)
+    }
+    ;(data as Int32Array)[index] = n
+    return
+  }
+  if (dtype === 'u32') {
+    if (!Number.isInteger(n) || n < 0 || n > 4294967295) {
+      throw new RangeError(`Cannot store ${String(value)} in u32 (need integer in Uint32 range)`)
+    }
+    ;(data as Uint32Array)[index] = n
+    return
+  }
+  ;(data as Float64Array | Float32Array)[index] = n
 }
 
-export function copyData(data: TypedData): TypedData {
-  if (Array.isArray(data)) return [...data]
-  return data.slice() as TypedData
-}
-
-export function inferDtype(values: unknown[]): DType {
+/** Streaming dtype inference over a column accessor (avoids 256-row sample traps). */
+export function inferDtypeFromValues(length: number, at: (i: number) => unknown): DType {
   let sawFloat = false
   let sawInt = false
   let sawBool = false
   let sawString = false
   let sawDate = false
-  for (const v of values) {
+  let intOutsideI32 = false
+  for (let i = 0; i < length; i++) {
+    const v = at(i)
     if (v === null || v === undefined) continue
     if (typeof v === 'boolean') {
       sawBool = true
@@ -408,7 +421,10 @@ export function inferDtype(values: unknown[]): DType {
     }
     if (typeof v === 'number') {
       if (!Number.isInteger(v)) sawFloat = true
-      else sawInt = true
+      else {
+        sawInt = true
+        if (v > 2147483647 || v < -2147483648) intOutsideI32 = true
+      }
       continue
     }
     if (v instanceof Date) {
@@ -420,18 +436,19 @@ export function inferDtype(values: unknown[]): DType {
   if (sawString) return 'utf8'
   if (sawDate) return 'datetime'
   if (sawBool && !sawFloat && !sawInt) return 'bool'
-  if (sawFloat) return 'f64'
-  if (sawInt) {
-    // Prefer f64 when any integer is outside Int32 range (e.g. epoch millis).
-    for (const v of values) {
-      if (typeof v === 'number' && Number.isInteger(v) && (v > 2147483647 || v < -2147483648)) {
-        return 'f64'
-      }
-    }
-    return 'i32'
-  }
+  if (sawFloat || intOutsideI32) return 'f64'
+  if (sawInt) return 'i32'
   if (sawBool) return 'bool'
   return 'f64'
+}
+
+export function inferDtype(values: unknown[]): DType {
+  return inferDtypeFromValues(values.length, (i) => values[i])
+}
+
+export function copyData(data: TypedData): TypedData {
+  if (Array.isArray(data)) return [...data]
+  return data.slice() as TypedData
 }
 
 export function encodeCategory(values: Array<string | null | undefined>): {

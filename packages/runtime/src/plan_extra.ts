@@ -459,12 +459,19 @@ export function unnestTable(table: TableView, column: string, separator = '.'): 
   return tableFromColumns(newCols)
 }
 
+/** Cell as text: category codes are decoded through the dictionary, never shown as numbers. */
+function cellText(c: Column, i: number): string {
+  const v = getValue(c.data, i)
+  if (c.field.dtype === 'category' && c.dictionary) return c.dictionary[Number(v)] ?? ''
+  return String(v)
+}
+
 export function transposeTable(table: TableView, headerColumn?: string): TableView {
   const headers =
     headerColumn !== undefined
       ? Array.from({ length: table.numRows }, (_, i) => {
           const c = getColumn(table, headerColumn)
-          return isValid(c.nullBitmap, i) ? String(getValue(c.data, i)) : `row_${i}`
+          return isValid(c.nullBitmap, i) ? cellText(c, i) : `row_${i}`
         })
       : Array.from({ length: table.numRows }, (_, i) => `row_${i}`)
   const valueCols = table.columns.filter((c) => c.field.name !== headerColumn)
@@ -477,7 +484,7 @@ export function transposeTable(table: TableView, headerColumn?: string): TableVi
   for (let r = 0; r < table.numRows; r++) {
     const data = valueCols.map((c) => {
       if (!isValid(c.nullBitmap, r)) return ''
-      return String(getValue(c.data, r))
+      return cellText(c, r)
     })
     out.push({ field: { name: headers[r]!, dtype: 'utf8', nullable: true }, data })
   }

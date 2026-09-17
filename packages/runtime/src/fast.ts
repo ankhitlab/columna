@@ -1280,6 +1280,32 @@ export function tryFastGroupBy(
  * Dense Int32 probe + identity-left reuse + fused right gather (no extra index copy).
  * Supports inner/left (full row assemble) and semi/anti (left-only filter).
  */
+/** Right-side key codes expressed in the left dictionary; null when the column cannot be remapped. */
+function remapKeyToDictionary(col: Column, dict: string[]): NumArr | null {
+  const index = new Map<string, number>()
+  for (let i = 0; i < dict.length; i++) if (!index.has(dict[i]!)) index.set(dict[i]!, i)
+  const n = col.data.length
+  if (col.field.dtype === 'category' && col.dictionary) {
+    const rd = col.dictionary
+    let same = rd === dict || rd.length === dict.length
+    if (same && rd !== dict) for (let i = 0; i < rd.length && same; i++) same = rd[i] === dict[i]
+    if (same) return col.data as NumArr
+    const codeMap = new Int32Array(rd.length)
+    for (let i = 0; i < rd.length; i++) codeMap[i] = index.get(rd[i]!) ?? -1
+    const codes = col.data as Uint32Array
+    const out = new Float64Array(n)
+    for (let i = 0; i < n; i++) out[i] = codeMap[codes[i]!] ?? -1
+    return out
+  }
+  if (col.field.dtype === 'utf8') {
+    const strs = col.data as string[]
+    const out = new Float64Array(n)
+    for (let i = 0; i < n; i++) out[i] = index.get(strs[i]!) ?? -1
+    return out
+  }
+  return null
+}
+
 export function tryFastJoin(
   left: TableView,
   right: TableView,
@@ -1293,8 +1319,17 @@ export function tryFastJoin(
   const lCol = getColumn(left, leftOn[0]!)
   const rCol = getColumn(right, rightOn[0]!)
   const lData = numericView(lCol)
-  const rData = numericView(rCol)
+  let rData = numericView(rCol)
   if (!lData || !rData) return null
+  // Category keys are compared by dictionary code, which is only meaningful inside one dictionary. Two
+  // frames built separately encode the same strings under different codes, so the right key is remapped
+  // into the left dictionary first (a string absent from it can never match: code -1).
+  if (lCol.field.dtype === 'category' || rCol.field.dtype === 'category') {
+    if (lCol.field.dtype !== 'category' || !lCol.dictionary) return null
+    const remapped = remapKeyToDictionary(rCol, lCol.dictionary)
+    if (!remapped) return null
+    rData = remapped
+  }
 
   const rn = right.numRows
   const ln = left.numRows

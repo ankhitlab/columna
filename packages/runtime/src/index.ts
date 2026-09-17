@@ -3,10 +3,14 @@ import { CpuBackend } from './cpu.js'
 import {
   DEFAULT_WASM_MIN_ROWS,
   DEFAULT_WEBGPU_MIN_ROWS,
+  EngineStrictError,
   estimateRows,
   explainPlan,
   type Backend,
   type EngineKind,
+  type ExecContext,
+  type ExecutionEvent,
+  type ExecutionReport,
   type PlanNode,
   type RuntimeOptions,
 } from './types.js'
@@ -21,6 +25,7 @@ export class Runtime {
       webgpuMinRows: options.webgpuMinRows ?? DEFAULT_WEBGPU_MIN_ROWS,
       wasmMinRows: options.wasmMinRows ?? DEFAULT_WASM_MIN_ROWS,
       preferGpu: options.preferGpu ?? true,
+      strict: options.strict ?? false,
     }
     this.register(new CpuBackend())
   }
@@ -34,8 +39,8 @@ export class Runtime {
   }
 
   /** Immutable-ish fork with a forced engine (does not mutate this instance). */
-  withEngine(engine: EngineKind): Runtime {
-    const rt = new Runtime({ ...this.options, engine })
+  withEngine(engine: EngineKind, options: { strict?: boolean } = {}): Runtime {
+    const rt = new Runtime({ ...this.options, engine, strict: options.strict ?? this.options.strict })
     for (const backend of this.backends.values()) {
       if (backend.name !== 'cpu') rt.register(backend)
     }
@@ -44,7 +49,7 @@ export class Runtime {
 
   explain(plan: PlanNode): string {
     const chosen = this.chooseBackend(plan)
-    return `Engine: ${chosen.name}\n${explainPlan(plan)}`
+    return `Engine: ${chosen.name} (planned — the backend a node actually ran on is only known after execution; see collectWithReport())\n${explainPlan(plan)}`
   }
 
   chooseBackend(plan: PlanNode): Backend {
@@ -52,6 +57,7 @@ export class Runtime {
       const forced = this.backends.get(this.options.engine)
       if (!forced) throw new Error(`Engine "${this.options.engine}" is not registered`)
       if (!forced.supports(plan)) {
+        if (this.options.strict) throw new EngineStrictError(this.options.engine, ['backend does not support this plan'])
         const cpu = this.backends.get('cpu')!
         return cpu
       }
@@ -74,26 +80,64 @@ export class Runtime {
   }
 
   async execute(plan: PlanNode): Promise<TableView> {
+    return (await this.executeWithReport(plan)).table
+  }
+
+  /**
+   * Execute and return what actually ran: per-node backend, kernels, fallback reasons and timings.
+   * In strict mode a plan whose requested engine executed no node throws `EngineStrictError`.
+   */
+  async executeWithReport(plan: PlanNode): Promise<{ table: TableView; report: ExecutionReport }> {
+    const requested = this.options.engine
+    const strict = this.options.strict
     const backend = this.chooseBackend(plan)
+    const events: ExecutionEvent[] = []
+    const fallbacks: ExecutionReport['fallbacks'] = []
+    const ctx: ExecContext = { requested, strict, trace: (e) => void events.push(e) }
+    const t0 = now()
+    const finish = (table: TableView, dispatched: EngineKind): { table: TableView; report: ExecutionReport } => {
+      const backendsUsed = [...new Set(events.map((e) => e.backend))]
+      const report: ExecutionReport = { requested, dispatched, strict, events, fallbacks, totalMs: now() - t0, backendsUsed }
+      if (strict && requested !== 'auto' && requested !== 'cpu' && !backendsUsed.includes(requested)) {
+        const reasons = [
+          ...fallbacks.map((f) => `${f.from} → ${f.to}: ${f.reason}`),
+          ...events.filter((e) => e.reason).map((e) => `${e.node}: ${e.reason}`),
+        ]
+        throw new EngineStrictError(requested, reasons)
+      }
+      return { table, report }
+    }
+    const run = async (b: Backend): Promise<TableView> => {
+      const r = b.execute(plan, ctx)
+      return r instanceof Promise ? r : Promise.resolve(r)
+    }
     try {
-      return await backend.execute(plan)
+      return finish(await run(backend), backend.name)
     } catch (err) {
+      if (err instanceof EngineStrictError) throw err
       if (backend.name === 'cpu') throw err
+      const reason = err instanceof Error ? err.message : String(err)
+      if (strict) throw new EngineStrictError(backend.name, [`backend threw: ${reason}`])
       // Fallback chain: webgpu → wasm → cpu
       if (backend.name === 'webgpu') {
         const wasm = this.backends.get('wasm')
         if (wasm?.supports(plan)) {
+          fallbacks.push({ from: 'webgpu', to: 'wasm', reason })
           try {
-            return await wasm.execute(plan)
-          } catch {
-            return this.backends.get('cpu')!.execute(plan)
+            return finish(await run(wasm), 'wasm')
+          } catch (err2) {
+            fallbacks.push({ from: 'wasm', to: 'cpu', reason: err2 instanceof Error ? err2.message : String(err2) })
+            return finish(await run(this.backends.get('cpu')!), 'cpu')
           }
         }
       }
-      return this.backends.get('cpu')!.execute(plan)
+      fallbacks.push({ from: backend.name, to: 'cpu', reason })
+      return finish(await run(this.backends.get('cpu')!), 'cpu')
     }
   }
 }
+
+const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
 let defaultRuntime: Runtime | null = null
 

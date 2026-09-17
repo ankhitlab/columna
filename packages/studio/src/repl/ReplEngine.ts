@@ -278,6 +278,10 @@ return { __captured, __result };
 `
 
     try {
+      // Trust boundary note: this is a REPL, not a sandbox. The code runs in the page's realm with the
+      // page's privileges — origin storage, opened folder handles, network as the page — exactly like the
+      // browser devtools console. A Worker or iframe would not change that (same origin, same handles,
+      // same fetch). Never feed Studio code you would not paste into devtools; see packages/studio/README.md.
       const fn = new AsyncFunction(body)
       const out = (await fn(env)) as { __captured: Record<string, unknown>; __result: unknown }
 

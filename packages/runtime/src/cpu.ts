@@ -16,7 +16,9 @@ import {
   type DType,
   type TableView,
 } from '@columna/arrow'
-import type { AggKind, Backend, CorrMethod, ExprNode, JoinKind, PlanNode, QuantileMethod, RankMethod } from './types.js'
+import type { AggKind, Backend, CorrMethod, ExecContext, ExprNode, JoinKind, PlanNode, QuantileMethod, RankMethod } from './types.js'
+import { PARALLEL_MIN_ROWS } from './parallel.js'
+import { isNativeKernelsLoaded, NATIVE_FILTER_MIN_ROWS } from './native_kernels.js'
 import { orderRows, overAggregateNumeric, overCumulativeNumeric, partitionIds, type Partition } from './over.js'
 import {
   applyMathOp,
@@ -271,10 +273,22 @@ function castValue(v: number | string | boolean, dtype: DType): number | string 
       return String(v)
     case 'bool':
       return Boolean(v)
+    case 'i32': {
+      const n = Number(v)
+      if (!Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
+        throw new RangeError(`Cannot cast ${String(v)} to i32 (need integer in Int32 range)`)
+      }
+      return n
+    }
+    case 'u32': {
+      const n = Number(v)
+      if (!Number.isInteger(n) || n < 0 || n > 4294967295) {
+        throw new RangeError(`Cannot cast ${String(v)} to u32 (need integer in Uint32 range)`)
+      }
+      return n
+    }
     case 'f64':
     case 'f32':
-    case 'i32':
-    case 'u32':
     case 'datetime':
     case 'category':
       return Number(v)
@@ -974,7 +988,10 @@ function joinKey(table: TableView, cols: string[], row: number): string {
     .map((name) => {
       const col = getColumn(table, name)
       if (!isValid(col.nullBitmap, row)) return '∅'
-      return String(getValue(col.data, row))
+      const v = getValue(col.data, row)
+      // category keys must compare by their string, never by the per-frame dictionary code
+      if (col.field.dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? '∅'
+      return String(v)
     })
     .join('\0')
 }
@@ -2121,16 +2138,28 @@ export class CpuBackend implements Backend {
     return true
   }
 
-  async execute(plan: PlanNode): Promise<TableView> {
+  async execute(plan: PlanNode, ctx?: ExecContext): Promise<TableView> {
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    const done = (table: TableView, kernel?: string): TableView => {
+      ctx?.trace({
+        node: plan.type,
+        backend: 'cpu',
+        kernel,
+        ms: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0,
+        rows: table.numRows,
+        reason: ctx.requested !== 'cpu' && ctx.requested !== 'auto' ? 'plan executed by the CPU engine' : undefined,
+      })
+      return table
+    }
     // B: parallel dual-gt + typed gather (helpers no-op to sync below thresholds)
     if (plan.type === 'filter') {
       const input = executeCpu(plan.input)
       const dual = matchDualGtFilter(input, plan.predicate)
       if (dual) {
         const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
-        return parallelTakeTable(input, idx)
+        return done(await parallelTakeTable(input, idx), input.numRows >= PARALLEL_MIN_ROWS ? 'workers:dualFilter' : isNativeKernelsLoaded() && input.numRows >= NATIVE_FILTER_MIN_ROWS ? 'native:dualFilter' : 'js:dualFilter')
       }
-      return filterTable(input, plan.predicate)
+      return done(filterTable(input, plan.predicate))
     }
     if (plan.type === 'project' && plan.input.type === 'filter') {
       const names = projectColumnNames(plan.columns)
@@ -2138,9 +2167,9 @@ export class CpuBackend implements Backend {
       const dual = matchDualGtFilter(input, plan.input.predicate)
       if (names && dual) {
         const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
-        return project(await parallelTakeTable(input, idx, names), plan.columns)
+        return done(project(await parallelTakeTable(input, idx, names), plan.columns), input.numRows >= PARALLEL_MIN_ROWS ? 'workers:dualFilter' : 'js:dualFilter')
       }
     }
-    return executeCpu(plan)
+    return done(executeCpu(plan))
   }
 }

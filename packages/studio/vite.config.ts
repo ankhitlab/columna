@@ -37,6 +37,10 @@ export default defineConfig({
   server: {
     port: 5173,
     open: true,
+    // Studio executes whatever is typed into it with the page's privileges. Keep the dev server on
+    // loopback; exposing it (`vite --host`) makes every device on the network a local user.
+    host: '127.0.0.1',
+    strictPort: false,
   },
   optimizeDeps: {
     exclude: ['columna'],

@@ -1,61 +1,61 @@
 import type { ExprNode, StrOp } from '@columna/runtime'
-import { Expr } from '../expr.js'
+import { Expr, type AnyExpr } from '../expr.js'
 
 export class StrNamespace {
-  constructor(private readonly expr: Expr) {}
+  constructor(private readonly expr: AnyExpr) {}
 
-  len(): Expr {
+  len(): Expr<number> {
     return this.op('len')
   }
-  toLowerCase(): Expr {
+  toLowerCase(): Expr<string> {
     return this.op('toLowerCase')
   }
-  toUpperCase(): Expr {
+  toUpperCase(): Expr<string> {
     return this.op('toUpperCase')
   }
-  trim(): Expr {
+  trim(): Expr<string> {
     return this.op('trim')
   }
-  contains(pattern: string): Expr {
+  contains(pattern: string): Expr<boolean> {
     return this.op('contains', { pattern })
   }
-  startsWith(pattern: string): Expr {
+  startsWith(pattern: string): Expr<boolean> {
     return this.op('startsWith', { pattern })
   }
-  endsWith(pattern: string): Expr {
+  endsWith(pattern: string): Expr<boolean> {
     return this.op('endsWith', { pattern })
   }
-  replace(pattern: string, replacement: string): Expr {
+  replace(pattern: string, replacement: string): Expr<string> {
     return this.op('replace', { pattern, replacement })
   }
-  replaceAll(pattern: string, replacement: string): Expr {
+  replaceAll(pattern: string, replacement: string): Expr<string> {
     return this.op('replaceAll', { pattern, replacement })
   }
-  slice(start: number, end?: number): Expr {
+  slice(start: number, end?: number): Expr<string> {
     return this.op('slice', { start, end })
   }
   /** Split into JSON-array string (use `explode` to expand rows). */
-  split(pattern = ','): Expr {
+  split(pattern = ','): Expr<string> {
     return this.op('split', { pattern })
   }
   /** Concatenate with another expression or literal string: `col('a').str.concat(col('b'), ' ')`. */
-  concat(other: Expr | string, separator = ''): Expr {
+  concat(other: AnyExpr | string, separator = ''): Expr<string> {
     const node: ExprNode = typeof other === 'string' ? { type: 'lit', value: other } : other.node
     return this.op('concat', { other: node, separator })
   }
   /** Pad on the left to `length` with `fill` (default space). */
-  padStart(length: number, fill = ' '): Expr {
+  padStart(length: number, fill = ' '): Expr<string> {
     return this.op('padStart', { length, fill })
   }
   /** Pad on the right to `length` with `fill` (default space). */
-  padEnd(length: number, fill = ' '): Expr {
+  padEnd(length: number, fill = ' '): Expr<string> {
     return this.op('padEnd', { length, fill })
   }
 
-  private op(
+  private op<R = string>(
     op: StrOp,
     extra: Partial<Extract<ExprNode, { type: 'str' }>> = {},
-  ): Expr {
+  ): Expr<R> {
     return new Expr({ type: 'str', op, expr: this.expr.node, ...extra })
   }
 }

@@ -1,3 +1,4 @@
+import { setRowField } from '@columna/arrow'
 import { consumeWithKafkaJs, isKafkaClient } from './consumer.js'
 import { decodePayload, valueToRowFields } from './decode.js'
 import { resolveFlatten } from './flatten.js'
@@ -91,9 +92,9 @@ function headersToJson(headers: KafkaRawMessage['headers']): string | null {
   if (!headers) return null
   const out: Record<string, string | null> = {}
   for (const [k, v] of Object.entries(headers)) {
-    if (v === undefined) out[k] = null
-    else if (typeof v === 'string') out[k] = v
-    else out[k] = v.toString('utf8')
+    if (v === undefined) setRowField(out, k, null)
+    else if (typeof v === 'string') setRowField(out, k, v)
+    else setRowField(out, k, v.toString('utf8'))
   }
   return JSON.stringify(out)
 }

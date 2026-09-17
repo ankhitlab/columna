@@ -37,7 +37,12 @@ export type SqlConnectionConfig = {
   }
   /** ClickHouse HTTP url override (default builds from host/port). */
   clickhouseUrl?: string
-  /** Keep the underlying driver connection open (caller must close). */
+  /**
+   * @deprecated Every `readSql` call with a URL / config opens a dedicated connection (or pool) and closes it
+   * afterwards; with `keepAlive` that connection is left open but nothing returns a handle to it, so it can
+   * only leak. To reuse a connection, open it once with `openSqlClient()` and pass the client to `readSql`,
+   * which never closes a client it did not open.
+   */
   keepAlive?: boolean
 }
 
@@ -48,6 +53,10 @@ export type ReadSqlOptions = {
   params?: SqlParams
   /** Force dialect when it cannot be inferred from the URL. */
   dialect?: SqlDialect
-  /** Max rows to materialize (applied after fetch when driver has no LIMIT pushdown). */
+  /**
+   * Maximum rows in the returned DataFrame. The driver's full result set is still fetched and buffered — this is
+   * a slice after the fact, never a LIMIT pushdown. To bound the query, transfer and driver memory, put LIMIT /
+   * TOP / FETCH FIRST in the SQL itself.
+   */
   nRows?: number
 }

@@ -4,6 +4,7 @@ import {
   fromArrowLike,
   getValue,
   inferDtype,
+  inferDtypeFromValues,
   isValid,
   setValid,
   setValue,
@@ -21,6 +22,7 @@ import {
   type AggKind,
   type CorrMethod,
   type EngineKind,
+  type ExecutionReport,
   type ExprNode,
   type JoinKind,
   type PlanNode,
@@ -28,9 +30,11 @@ import {
   type RankMethod,
   type Runtime,
 } from '@columna/runtime'
-import { Expr, col, lit, when } from './expr.js'
+import { Expr, col, lit, when, type AnyExpr, type ColRefs } from './expr.js'
 import {
   parseCsvToRows,
+  parseCsvToTable,
+  readCsvTable,
   parseJsonToRows,
   readCsvRows,
   readDatabaseRows,
@@ -48,9 +52,64 @@ import {
   type ReadSqlOptions,
   type SqlConnection,
 } from './io/index.js'
-import { writeCsvText, writeParquetBytes, tableToCsv, tableToParquetLike } from './io/write.js'
+import { writeCsvText, writeParquetBytes, writeParquetLikeBytes, tableToCsv, tableToParquetLike, type CsvWriteOptions } from './io/write.js'
 import { profileTable, tableToHtml, tableToMarkdown, type ProfileReport } from './io/present.js'
-export type AggSpec = Record<string, AggKind | Expr>
+export type AggSpec = Record<string, AggKind | AnyExpr>
+
+// ---------------------------------------------------------------------------------------------------
+// Schema typing. Frames carry a phantom row type `S`; every operation that changes columns computes the
+// next `S`, so the compiler knows which columns exist and what `toArray()` returns. Everything defaults to
+// `Row` (`Record<string, unknown>`), i.e. untyped code keeps compiling unchanged.
+// ---------------------------------------------------------------------------------------------------
+
+/** A row: column name → value. The default schema when nothing is known. */
+export type Row = Record<string, unknown>
+type Simplify<T> = { [K in keyof T]: T[K] } & {}
+type UnionToIntersection<U> = (U extends unknown ? (k: U) => void : never) extends (k: infer I) => void ? I : never
+type NameOf<E> = E extends Expr<any, infer N> ? N : never
+type TypeOf<E> = E extends Expr<infer T, any> ? T : never
+/** Columns produced by a list of (aliased) expressions; an unaliased expression contributes nothing the compiler can name. */
+type ExprRow<E extends readonly AnyExpr[]> = UnionToIntersection<
+  { [I in keyof E]: string extends NameOf<E[I]> ? Record<never, never> : Record<NameOf<E[I]>, TypeOf<E[I]>> }[number]
+>
+type Nullable<S> = { [K in keyof S]: S[K] | null }
+/** Schema of a join result. Suffixes for colliding names are not modelled: a shared non-key column keeps the left type here. */
+export type JoinResult<L, R, How extends JoinKind> = How extends 'inner' | 'cross'
+  ? Simplify<L & R>
+  : How extends 'left'
+    ? Simplify<L & Nullable<R>>
+    : How extends 'right'
+      ? Simplify<Nullable<L> & R>
+      : How extends 'outer'
+        ? Simplify<Nullable<L> & Nullable<R>>
+        : L // semi / anti keep the left rows
+type Renamed<S, M> = { [K in keyof S as K extends keyof M ? (M[K] extends string ? M[K] : K) : K]: S[K] }
+/** Result columns of `groupBy().agg()`: keys keep their type, aggregates are numbers unless the expression says otherwise. */
+type AggResult<A> = { [K in keyof A]: A[K] extends Expr<infer T, any> ? (unknown extends T ? number : T) : number }
+/** Value type of a column as `Series.toArray()` reports it: the schema's type, or the cell union when unknown. */
+type Cell<T> = unknown extends T ? number | string | boolean | null : T
+/** Schema inferred from `fromColumns` input. */
+type ColumnValue<C> = C extends Float64Array | Float32Array | Int32Array | Uint32Array
+  ? number
+  : C extends Uint8Array
+    ? boolean
+    : C extends { codes: Uint32Array; dictionary: string[] }
+      ? string
+      : C extends ReadonlyArray<infer V>
+        ? V extends Date
+          ? number
+          : V
+        : unknown
+export type InferColumns<C> = Simplify<{ [K in keyof C]: ColumnValue<C[K]> }>
+/** Expression or a callback receiving typed column refs. */
+type ExprOrFn<S, E> = E | ((c: ColRefs<S>) => E)
+function resolveExpr<S extends Row, E>(v: ExprOrFn<S, E>): E {
+  return typeof v === 'function' ? (v as (c: ColRefs<S>) => E)(colRefs<S>()) : v
+}
+function colRefs<S extends Row>(): ColRefs<S> {
+  return new Proxy({} as ColRefs<S>, { get: (_t, key) => (typeof key === 'string' ? col(key) : undefined) })
+}
+type SortKey = string | AnyExpr | { expr: AnyExpr; descending: boolean }
 export type {
   IoSource,
   KafkaConnection,
@@ -72,22 +131,38 @@ export type {
   KafkaSaslOptions,
 } from './io/kafka/types.js'
 
-export class LazyFrame {
+export class LazyFrame<S extends Row = Row> {
+  /** @internal phantom schema; never assigned at runtime */
+  declare readonly __schema?: S
+
   constructor(
     readonly plan: PlanNode,
     private runtime: Runtime = getDefaultRuntime(),
   ) {}
 
-  engine(kind: EngineKind): LazyFrame {
-    return new LazyFrame(this.plan, this.runtime.withEngine(kind))
+  /**
+   * Force a backend. `strict: true` makes the choice a contract: if that engine cannot run the plan, throws,
+   * or hands every node to another engine, `collect()` rejects with `EngineStrictError` listing the reasons
+   * instead of silently running elsewhere. Without it, `engine()` is a preference with CPU fallback.
+   */
+  engine(kind: EngineKind, options: { strict?: boolean } = {}): LazyFrame<S> {
+    return new LazyFrame<S>(this.plan, this.runtime.withEngine(kind, options))
   }
 
+  /** The plan and the backend it is dispatched to. What ran is only known after execution: see `collectWithReport()`. */
   explain(): string {
     return this.runtime.explain(this.plan)
   }
 
-  select(...columns: Array<string | Expr>): LazyFrame {
-    return new LazyFrame(
+  /** Keep only these columns (names are checked against the schema) … */
+  select<K extends keyof S & string>(...columns: K[]): LazyFrame<Simplify<Pick<S, K>>>
+  /** … or build new ones from (aliased) expressions, optionally from typed column refs. */
+  select<E extends readonly AnyExpr[]>(...exprs: E): LazyFrame<Simplify<ExprRow<E>>>
+  select<const E extends readonly AnyExpr[]>(fn: (c: ColRefs<S>) => E): LazyFrame<Simplify<ExprRow<E>>>
+  select(...columns: Array<(keyof S & string) | AnyExpr>): LazyFrame<Row>
+  select(...args: Array<string | AnyExpr | ((c: ColRefs<S>) => readonly AnyExpr[])>): LazyFrame<any> {
+    const columns = args.length === 1 && typeof args[0] === 'function' ? [...args[0](colRefs<S>())] : (args as Array<string | AnyExpr>)
+    return new LazyFrame<any>(
       {
         type: 'project',
         input: this.plan,
@@ -97,22 +172,25 @@ export class LazyFrame {
     )
   }
 
-  drop(...columns: string[]): LazyFrame {
-    return new LazyFrame({ type: 'drop', input: this.plan, columns }, this.runtime)
+  drop<K extends keyof S & string>(...columns: K[]): LazyFrame<Simplify<Omit<S, K>>> {
+    return new LazyFrame<any>({ type: 'drop', input: this.plan, columns }, this.runtime)
   }
 
-  rename(mapping: Record<string, string>): LazyFrame {
-    return new LazyFrame({ type: 'rename', input: this.plan, mapping }, this.runtime)
+  rename<const M extends { [K in keyof S & string]?: string }>(mapping: M): LazyFrame<Simplify<Renamed<S, M>>> {
+    return new LazyFrame<any>({ type: 'rename', input: this.plan, mapping: mapping as Record<string, string> }, this.runtime)
   }
 
-  withColumn(name: string, expr: Expr): LazyFrame {
-    return new LazyFrame({ type: 'withColumn', input: this.plan, name, expr: expr.node }, this.runtime)
+  /** Add or replace one column; the result schema knows its name and the expression's value type. */
+  withColumn<N extends string, T>(name: N, expr: ExprOrFn<S, Expr<T, any>>): LazyFrame<Simplify<Omit<S, N> & Record<N, T>>> {
+    return new LazyFrame<any>({ type: 'withColumn', input: this.plan, name, expr: resolveExpr<S, Expr<T, any>>(expr).node }, this.runtime)
   }
 
-  /** Add/replace multiple columns in one plan node. */
-  withColumns(
-    ...cols: Array<Expr | Record<string, Expr> | [string, Expr]>
-  ): LazyFrame {
+  /** Add/replace multiple columns in one plan node. Aliased expressions extend the schema by name. */
+  withColumns<E extends readonly AnyExpr[]>(...exprs: E): LazyFrame<Simplify<Omit<S, keyof ExprRow<E>> & ExprRow<E>>>
+  withColumns<const E extends readonly AnyExpr[]>(fn: (c: ColRefs<S>) => E): LazyFrame<Simplify<Omit<S, keyof ExprRow<E>> & ExprRow<E>>>
+  withColumns(...cols: Array<AnyExpr | Record<string, AnyExpr> | [string, AnyExpr]>): LazyFrame<Row>
+  withColumns(...args: Array<AnyExpr | Record<string, AnyExpr> | [string, AnyExpr] | ((c: ColRefs<S>) => readonly AnyExpr[])>): LazyFrame<any> {
+    const cols = args.length === 1 && typeof args[0] === 'function' ? [...args[0](colRefs<S>())] : (args as Array<AnyExpr | Record<string, AnyExpr> | [string, AnyExpr]>)
     const columns: Array<{ name: string; expr: ExprNode }> = []
     for (const c of cols) {
       if (Array.isArray(c)) {
@@ -131,74 +209,83 @@ export class LazyFrame {
         }
       }
     }
-    return new LazyFrame({ type: 'withColumns', input: this.plan, columns }, this.runtime)
+    return new LazyFrame<any>({ type: 'withColumns', input: this.plan, columns }, this.runtime)
   }
 
-  filter(predicate: Expr): LazyFrame {
-    return new LazyFrame({ type: 'filter', input: this.plan, predicate: predicate.node }, this.runtime)
+  /** Keep rows where the predicate is true. A typed frame checks the predicate is boolean: `df.filter((c) => c.age.gt(18))`. */
+  filter(predicate: ExprOrFn<S, Expr<boolean, any>>): LazyFrame<S> {
+    return new LazyFrame<S>({ type: 'filter', input: this.plan, predicate: resolveExpr<S, Expr<boolean, any>>(predicate).node }, this.runtime)
   }
 
-  sort(...by: Array<string | Expr | { expr: Expr; descending: boolean }>): LazyFrame {
-    const keys = by.map((b) => {
+  sort(...by: Array<(keyof S & string) | AnyExpr | { expr: AnyExpr; descending: boolean } | ((c: ColRefs<S>) => SortKey | SortKey[])>): LazyFrame<S>
+  sort(...by: Array<SortKey | ((c: ColRefs<S>) => SortKey | SortKey[])>): LazyFrame<S> {
+    const flat: SortKey[] = []
+    for (const b of by) {
+      if (typeof b === 'function') {
+        const r = b(colRefs<S>())
+        flat.push(...(Array.isArray(r) ? r : [r]))
+      } else flat.push(b)
+    }
+    const keys = flat.map((b) => {
       if (typeof b === 'string') return { expr: col(b).node, descending: false }
       if (b instanceof Expr) return { expr: b.node, descending: false }
       return { expr: b.expr.node, descending: b.descending }
     })
-    return new LazyFrame({ type: 'sort', input: this.plan, by: keys }, this.runtime)
+    return new LazyFrame<S>({ type: 'sort', input: this.plan, by: keys }, this.runtime)
   }
 
-  head(n = 5): LazyFrame {
-    return new LazyFrame({ type: 'limit', input: this.plan, n }, this.runtime)
+  head(n = 5): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'limit', input: this.plan, n }, this.runtime)
   }
 
-  tail(n = 5): LazyFrame {
-    return new LazyFrame({ type: 'slice', input: this.plan, start: -n }, this.runtime)
+  tail(n = 5): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'slice', input: this.plan, start: -n }, this.runtime)
   }
 
-  limit(n: number, offset = 0): LazyFrame {
-    return new LazyFrame({ type: 'limit', input: this.plan, n, offset }, this.runtime)
+  limit(n: number, offset = 0): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'limit', input: this.plan, n, offset }, this.runtime)
   }
 
-  slice(start: number, end?: number): LazyFrame {
-    return new LazyFrame({ type: 'slice', input: this.plan, start, end }, this.runtime)
+  slice(start: number, end?: number): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'slice', input: this.plan, start, end }, this.runtime)
   }
 
-  take(indices: number[]): LazyFrame {
-    return new LazyFrame({ type: 'take', input: this.plan, indices }, this.runtime)
+  take(indices: number[]): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'take', input: this.plan, indices }, this.runtime)
   }
 
-  sample(options: { n?: number; fraction?: number; seed?: number } = {}): LazyFrame {
-    return new LazyFrame({ type: 'sample', input: this.plan, ...options }, this.runtime)
+  sample(options: { n?: number; fraction?: number; seed?: number } = {}): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'sample', input: this.plan, ...options }, this.runtime)
   }
 
-  explode(column: string): LazyFrame {
-    return new LazyFrame({ type: 'explode', input: this.plan, column }, this.runtime)
+  explode(column: string): LazyFrame<Row> {
+    return new LazyFrame<any>({ type: 'explode', input: this.plan, column }, this.runtime)
   }
 
-  unnest(column: string, separator = '.'): LazyFrame {
-    return new LazyFrame({ type: 'unnest', input: this.plan, column, separator }, this.runtime)
+  unnest(column: string, separator = '.'): LazyFrame<Row> {
+    return new LazyFrame<any>({ type: 'unnest', input: this.plan, column, separator }, this.runtime)
   }
 
-  transpose(headerColumn?: string): LazyFrame {
-    return new LazyFrame({ type: 'transpose', input: this.plan, headerColumn }, this.runtime)
+  transpose(headerColumn?: string): LazyFrame<Row> {
+    return new LazyFrame<any>({ type: 'transpose', input: this.plan, headerColumn }, this.runtime)
   }
 
-  interpolate(columns?: string[]): LazyFrame {
-    return new LazyFrame({ type: 'interpolate', input: this.plan, columns }, this.runtime)
+  interpolate(columns?: string[]): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'interpolate', input: this.plan, columns }, this.runtime)
   }
 
-  groupBy(...keys: string[]): GroupBy {
-    return new GroupBy(this.plan, keys, this.runtime)
+  groupBy<K extends keyof S & string>(...keys: K[]): GroupBy<S, K> {
+    return new GroupBy<S, K>(this.plan, keys, this.runtime)
   }
 
-  join(
-    other: LazyFrame | DataFrame,
-    options: { on?: string | string[]; leftOn?: string | string[]; rightOn?: string | string[]; how?: JoinKind } = {},
-  ): LazyFrame {
+  join<R extends Row, How extends JoinKind = 'inner'>(
+    other: LazyFrame<R> | DataFrame<R>,
+    options: { on?: string | string[]; leftOn?: string | string[]; rightOn?: string | string[]; how?: How } = {},
+  ): LazyFrame<JoinResult<S, R, How>> {
     const rightPlan = other instanceof DataFrame ? other.lazy().plan : other.plan
     const how = options.how ?? 'inner'
     if (how === 'cross') {
-      return new LazyFrame(
+      return new LazyFrame<any>(
         { type: 'join', left: this.plan, right: rightPlan, leftOn: [], rightOn: [], how: 'cross' },
         this.runtime,
       )
@@ -215,7 +302,7 @@ export class LazyFrame {
         : [options.rightOn]
       : on
     if (!leftOn || !rightOn) throw new Error('join requires on or leftOn/rightOn')
-    return new LazyFrame(
+    return new LazyFrame<any>(
       {
         type: 'join',
         left: this.plan,
@@ -228,32 +315,32 @@ export class LazyFrame {
     )
   }
 
-  leftJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  leftJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<JoinResult<S, R, 'left'>> {
     return this.join(other, { on, how: 'left' })
   }
 
-  innerJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  innerJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<JoinResult<S, R, 'inner'>> {
     return this.join(other, { on, how: 'inner' })
   }
 
-  semiJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  semiJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<S> {
     return this.join(other, { on, how: 'semi' })
   }
 
-  antiJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  antiJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<S> {
     return this.join(other, { on, how: 'anti' })
   }
 
-  crossJoin(other: LazyFrame | DataFrame): LazyFrame {
+  crossJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>): LazyFrame<JoinResult<S, R, 'cross'>> {
     return this.join(other, { how: 'cross' })
   }
 
-  joinAsof(
-    other: LazyFrame | DataFrame,
+  joinAsof<R extends Row>(
+    other: LazyFrame<R> | DataFrame<R>,
     options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest' },
-  ): LazyFrame {
+  ): LazyFrame<JoinResult<S, R, 'left'>> {
     const rightPlan = other instanceof DataFrame ? other.lazy().plan : other.plan
-    return new LazyFrame(
+    return new LazyFrame<any>(
       {
         type: 'asofJoin',
         left: this.plan,
@@ -266,16 +353,16 @@ export class LazyFrame {
     )
   }
 
-  fillNull(value: number | string | boolean, columns?: string[]): LazyFrame {
-    return new LazyFrame({ type: 'fillNull', input: this.plan, value, columns }, this.runtime)
+  fillNull(value: number | string | boolean, columns?: string[]): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'fillNull', input: this.plan, value, columns }, this.runtime)
   }
 
-  dropNull(columns?: string[]): LazyFrame {
-    return new LazyFrame({ type: 'dropNull', input: this.plan, columns }, this.runtime)
+  dropNull(columns?: string[]): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'dropNull', input: this.plan, columns }, this.runtime)
   }
 
-  melt(options: { idVars: string[]; valueVars: string[]; varName?: string; valueName?: string }): LazyFrame {
-    return new LazyFrame(
+  melt(options: { idVars: string[]; valueVars: string[]; varName?: string; valueName?: string }): LazyFrame<Row> {
+    return new LazyFrame<any>(
       {
         type: 'melt',
         input: this.plan,
@@ -288,8 +375,8 @@ export class LazyFrame {
     )
   }
 
-  pivot(options: { index: string | string[]; columns: string; values: string; agg?: AggKind }): LazyFrame {
-    return new LazyFrame(
+  pivot(options: { index: string | string[]; columns: string; values: string; agg?: AggKind }): LazyFrame<Row> {
+    return new LazyFrame<any>(
       {
         type: 'pivot',
         input: this.plan,
@@ -302,20 +389,20 @@ export class LazyFrame {
     )
   }
 
-  unique(columns?: string[], keep: 'first' | 'last' | 'none' = 'first'): LazyFrame {
-    return new LazyFrame({ type: 'unique', input: this.plan, columns, keep }, this.runtime)
+  unique(columns?: string[], keep: 'first' | 'last' | 'none' = 'first'): LazyFrame<S> {
+    return new LazyFrame<any>({ type: 'unique', input: this.plan, columns, keep }, this.runtime)
   }
 
-  valueCounts(column: string, normalize = false): LazyFrame {
-    return new LazyFrame({ type: 'valueCounts', input: this.plan, column, normalize }, this.runtime)
+  valueCounts(column: string, normalize = false): LazyFrame<Row> {
+    return new LazyFrame<any>({ type: 'valueCounts', input: this.plan, column, normalize }, this.runtime)
   }
 
   /**
    * count / mean / std / min / 25% / 50% / 75% / max per numeric column.
    * `quantileMethod: 'minitab'` switches the quartiles to Minitab's p(n + 1) definition (type 6).
    */
-  describe(options?: { quantileMethod?: QuantileMethod }): LazyFrame {
-    return new LazyFrame(
+  describe(options?: { quantileMethod?: QuantileMethod }): LazyFrame<Row> {
+    return new LazyFrame<any>(
       { type: 'describe', input: this.plan, ...(options?.quantileMethod ? { quantileMethod: options.quantileMethod } : {}) },
       this.runtime,
     )
@@ -325,39 +412,39 @@ export class LazyFrame {
    * Pairwise correlation matrix of numeric columns (pandas `df.corr()`): a `column` label column plus one
    * f64 column per variable. Uses pairwise-complete rows; NaN when fewer than two pairs or zero variance.
    */
-  corr(options: { columns?: string[]; method?: CorrMethod } = {}): LazyFrame {
-    return new LazyFrame(
+  corr(options: { columns?: string[]; method?: CorrMethod } = {}): LazyFrame<Row> {
+    return new LazyFrame<any>(
       { type: 'corr', input: this.plan, kind: 'corr', method: options.method ?? 'pearson', columns: options.columns },
       this.runtime,
     )
   }
 
   /** Sample covariance matrix (n−1) of numeric columns (pandas `df.cov()`); same layout as `corr()`. */
-  cov(options: { columns?: string[] } = {}): LazyFrame {
-    return new LazyFrame(
+  cov(options: { columns?: string[] } = {}): LazyFrame<Row> {
+    return new LazyFrame<any>(
       { type: 'corr', input: this.plan, kind: 'cov', method: 'pearson', columns: options.columns },
       this.runtime,
     )
   }
 
-  withWindow(
-    name: string,
+  withWindow<N extends string>(
+    name: N,
     fn: 'rank' | 'lag' | 'lead' | 'cumsum' | 'rowNumber',
     options: {
-      expr?: Expr
+      expr?: AnyExpr
       offset?: number
       /** rank only: tie handling, default 'average' (pandas / Minitab) */
       method?: RankMethod
       partitionBy?: string[]
-      orderBy?: Array<string | Expr | { expr: Expr; descending: boolean }>
+      orderBy?: Array<string | AnyExpr | { expr: AnyExpr; descending: boolean }>
     } = {},
-  ): LazyFrame {
+  ): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
     const orderBy = options.orderBy?.map((b) => {
       if (typeof b === 'string') return { expr: col(b).node, descending: false }
       if (b instanceof Expr) return { expr: b.node, descending: false }
       return { expr: b.expr.node, descending: b.descending }
     })
-    return new LazyFrame(
+    return new LazyFrame<any>(
       {
         type: 'window',
         input: this.plan,
@@ -373,33 +460,43 @@ export class LazyFrame {
     )
   }
 
-  rolling(name: string, column: string, window: number, agg: AggKind = 'mean'): LazyFrame {
+  rolling<N extends string>(name: N, column: keyof S & string, window: number, agg: AggKind = 'mean'): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
     if (!Number.isInteger(window) || window < 1) throw new RangeError(`rolling: window must be a positive integer (got ${window})`)
-    return new LazyFrame({ type: 'rolling', input: this.plan, name, column, window, agg }, this.runtime)
+    return new LazyFrame<any>({ type: 'rolling', input: this.plan, name, column, window, agg }, this.runtime)
   }
 
-  expanding(name: string, column: string, agg: AggKind = 'mean'): LazyFrame {
-    return new LazyFrame({ type: 'expanding', input: this.plan, name, column, agg }, this.runtime)
+  expanding<N extends string>(name: N, column: keyof S & string, agg: AggKind = 'mean'): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
+    return new LazyFrame<any>({ type: 'expanding', input: this.plan, name, column, agg }, this.runtime)
   }
 
-  pipe<T>(fn: (lf: LazyFrame) => T): T {
+  pipe<T>(fn: (lf: LazyFrame<S>) => T): T {
     return fn(this)
   }
 
-  static concat(frames: Array<LazyFrame | DataFrame>, how: 'vertical' | 'horizontal' = 'vertical'): LazyFrame {
-    return new LazyFrame({
+  static concat<F extends LazyFrame<any> | DataFrame<any>>(frames: F[], how: 'vertical' | 'horizontal' = 'vertical'): LazyFrame<F extends LazyFrame<infer X> ? X : F extends DataFrame<infer Y> ? Y : Row> {
+    return new LazyFrame<any>({
       type: 'concat',
       frames: frames.map((f) => (f instanceof DataFrame ? f.lazy().plan : f.plan)),
       how,
     })
   }
 
-  async collect(): Promise<DataFrame> {
+  async collect(): Promise<DataFrame<S>> {
     const table = await this.runtime.execute(this.plan)
-    return new DataFrame(table, this.runtime)
+    return new DataFrame<S>(table, this.runtime)
   }
 
-  async toArray(): Promise<Record<string, unknown>[]> {
+  /**
+   * `collect()` plus an execution report: which backend ran each node, which kernel (Rust / native / workers /
+   * GPU), why a node fell back to the CPU, and timings (for GPU nodes transfer vs. compute, plus the CPU
+   * gather). Use it for benchmarks — "engine('wasm')" is a request, the report is the fact.
+   */
+  async collectWithReport(): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+    const { table, report } = await this.runtime.executeWithReport(this.plan)
+    return { frame: new DataFrame<S>(table, this.runtime), report }
+  }
+
+  async toArray(): Promise<S[]> {
     const df = await this.collect()
     return df.toArray()
   }
@@ -410,16 +507,18 @@ export class LazyFrame {
   }
 }
 
-export class GroupBy {
+export class GroupBy<S extends Row = Row, K extends keyof S & string = keyof S & string> {
   constructor(
     private input: PlanNode,
-    private keys: string[],
+    private keys: K[],
     private runtime: Runtime,
   ) {}
 
-  agg(spec: AggSpec): LazyFrame {
+  /** Aggregate per group. Result columns: the keys, then one column per entry (its type from the expression, number for AggKind names). */
+  agg<A extends Record<string, AggKind | AnyExpr>>(spec: A | ((c: ColRefs<S>) => A)): LazyFrame<Simplify<Pick<S, K> & AggResult<A>>> {
+    const resolved: Record<string, AggKind | AnyExpr> = typeof spec === 'function' ? spec(colRefs<S>()) : spec
     const aggs: Array<{ name: string; expr: ExprNode }> = []
-    for (const [name, value] of Object.entries(spec)) {
+    for (const [name, value] of Object.entries(resolved)) {
       if (value instanceof Expr) {
         const node = value.node.type === 'agg' ? value.node : value.node
         const outName =
@@ -441,11 +540,11 @@ export class GroupBy {
         aggs.push({ name, expr: { type: 'agg', op: value, expr: { type: 'col', name } } })
       }
     }
-    return new LazyFrame({ type: 'groupBy', input: this.input, keys: this.keys, aggs }, this.runtime)
+    return new LazyFrame<any>({ type: 'groupBy', input: this.input, keys: this.keys, aggs }, this.runtime)
   }
 }
 
-export class Series {
+export class Series<T = number | string | boolean | null> {
   constructor(
     readonly name: string,
     readonly column: Column,
@@ -456,7 +555,11 @@ export class Series {
     return this.numRows
   }
 
-  toArray(): Array<number | string | boolean | null> {
+  get dtype(): DType {
+    return this.column.field.dtype
+  }
+
+  toArray(): T[] {
     const out: Array<number | string | boolean | null> = []
     for (let i = 0; i < this.numRows; i++) {
       if (!isValid(this.column.nullBitmap, i)) {
@@ -469,7 +572,7 @@ export class Series {
         out.push(this.column.dictionary[Number(v)] ?? null)
       } else out.push(v as number | string)
     }
-    return out
+    return out as T[]
   }
 
   nullCount(): number {
@@ -511,9 +614,9 @@ export class Series {
     return count ? max : null
   }
 
-  unique(): Array<number | string | boolean | null> {
+  unique(): T[] {
     const seen = new Set<string>()
-    const out: Array<number | string | boolean | null> = []
+    const out: T[] = []
     for (const v of this.toArray()) {
       const k = String(v)
       if (seen.has(k)) continue
@@ -523,16 +626,19 @@ export class Series {
     return out
   }
 
-  head(n = 5): Array<number | string | boolean | null> {
+  head(n = 5): T[] {
     return this.toArray().slice(0, n)
   }
 
-  tail(n = 5): Array<number | string | boolean | null> {
+  tail(n = 5): T[] {
     return this.toArray().slice(-n)
   }
 }
 
-export class DataFrame {
+export class DataFrame<S extends Row = Row> {
+  /** @internal phantom schema; never assigned at runtime */
+  declare readonly __schema?: S
+
   constructor(
     readonly table: TableView,
     private runtime: Runtime = getDefaultRuntime(),
@@ -550,153 +656,171 @@ export class DataFrame {
     return Object.fromEntries(this.table.schema.map((f) => [f.name, f.dtype]))
   }
 
-  lazy(): LazyFrame {
-    return new LazyFrame({ type: 'scan', table: this.table }, this.runtime)
+  lazy(): LazyFrame<S> {
+    return new LazyFrame<S>({ type: 'scan', table: this.table }, this.runtime)
   }
 
-  select(...columns: Array<string | Expr>): LazyFrame {
-    return this.lazy().select(...columns)
+  select<K extends keyof S & string>(...columns: K[]): LazyFrame<Simplify<Pick<S, K>>>
+  select<E extends readonly AnyExpr[]>(...exprs: E): LazyFrame<Simplify<ExprRow<E>>>
+  select<const E extends readonly AnyExpr[]>(fn: (c: ColRefs<S>) => E): LazyFrame<Simplify<ExprRow<E>>>
+  select(...columns: Array<(keyof S & string) | AnyExpr>): LazyFrame<Row>
+  select(...args: Array<string | AnyExpr | ((c: ColRefs<S>) => readonly AnyExpr[])>): LazyFrame<any> {
+    return (this.lazy().select as (...a: unknown[]) => LazyFrame<any>)(...args)
   }
-  drop(...columns: string[]): LazyFrame {
+  drop<K extends keyof S & string>(...columns: K[]): LazyFrame<Simplify<Omit<S, K>>> {
     return this.lazy().drop(...columns)
   }
-  rename(mapping: Record<string, string>): LazyFrame {
+  rename<const M extends { [K in keyof S & string]?: string }>(mapping: M): LazyFrame<Simplify<Renamed<S, M>>> {
     return this.lazy().rename(mapping)
   }
-  withColumn(name: string, expr: Expr): LazyFrame {
+  withColumn<N extends string, T>(name: N, expr: ExprOrFn<S, Expr<T, any>>): LazyFrame<Simplify<Omit<S, N> & Record<N, T>>> {
     return this.lazy().withColumn(name, expr)
   }
-  withColumns(...cols: Array<Expr | Record<string, Expr> | [string, Expr]>): LazyFrame {
-    return this.lazy().withColumns(...cols)
+  withColumns<E extends readonly AnyExpr[]>(...exprs: E): LazyFrame<Simplify<Omit<S, keyof ExprRow<E>> & ExprRow<E>>>
+  withColumns<const E extends readonly AnyExpr[]>(fn: (c: ColRefs<S>) => E): LazyFrame<Simplify<Omit<S, keyof ExprRow<E>> & ExprRow<E>>>
+  withColumns(...cols: Array<AnyExpr | Record<string, AnyExpr> | [string, AnyExpr]>): LazyFrame<Row>
+  withColumns(...args: Array<AnyExpr | Record<string, AnyExpr> | [string, AnyExpr] | ((c: ColRefs<S>) => readonly AnyExpr[])>): LazyFrame<any> {
+    return (this.lazy().withColumns as (...a: unknown[]) => LazyFrame<any>)(...args)
   }
-  filter(predicate: Expr): LazyFrame {
+  filter(predicate: ExprOrFn<S, Expr<boolean, any>>): LazyFrame<S> {
     return this.lazy().filter(predicate)
   }
-  sort(...by: Array<string | Expr | { expr: Expr; descending: boolean }>): LazyFrame {
+  sort(...by: Array<(keyof S & string) | AnyExpr | { expr: AnyExpr; descending: boolean } | ((c: ColRefs<S>) => SortKey | SortKey[])>): LazyFrame<S> {
     return this.lazy().sort(...by)
   }
-  head(n = 5): LazyFrame {
+  head(n = 5): LazyFrame<S> {
     return this.lazy().head(n)
   }
-  tail(n = 5): LazyFrame {
+  tail(n = 5): LazyFrame<S> {
     return this.lazy().tail(n)
   }
-  limit(n: number, offset = 0): LazyFrame {
+  limit(n: number, offset = 0): LazyFrame<S> {
     return this.lazy().limit(n, offset)
   }
-  slice(start: number, end?: number): LazyFrame {
+  slice(start: number, end?: number): LazyFrame<S> {
     return this.lazy().slice(start, end)
   }
-  take(indices: number[]): LazyFrame {
+  take(indices: number[]): LazyFrame<S> {
     return this.lazy().take(indices)
   }
-  sample(options?: { n?: number; fraction?: number; seed?: number }): LazyFrame {
+  sample(options?: { n?: number; fraction?: number; seed?: number }): LazyFrame<S> {
     return this.lazy().sample(options)
   }
-  explode(column: string): LazyFrame {
+  explode(column: string): LazyFrame<Row> {
     return this.lazy().explode(column)
   }
-  unnest(column: string, separator?: string): LazyFrame {
+  unnest(column: string, separator?: string): LazyFrame<Row> {
     return this.lazy().unnest(column, separator)
   }
-  transpose(headerColumn?: string): LazyFrame {
+  transpose(headerColumn?: string): LazyFrame<Row> {
     return this.lazy().transpose(headerColumn)
   }
-  interpolate(columns?: string[]): LazyFrame {
+  interpolate(columns?: string[]): LazyFrame<S> {
     return this.lazy().interpolate(columns)
   }
-  groupBy(...keys: string[]): GroupBy {
+  groupBy<K extends keyof S & string>(...keys: K[]): GroupBy<S, K> {
     return this.lazy().groupBy(...keys)
   }
-  join(
-    other: LazyFrame | DataFrame,
-    options?: { on?: string | string[]; leftOn?: string | string[]; rightOn?: string | string[]; how?: JoinKind },
-  ): LazyFrame {
+  join<R extends Row, How extends JoinKind = 'inner'>(
+    other: LazyFrame<R> | DataFrame<R>,
+    options?: { on?: string | string[]; leftOn?: string | string[]; rightOn?: string | string[]; how?: How },
+  ): LazyFrame<JoinResult<S, R, How>> {
     return this.lazy().join(other, options)
   }
-  leftJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  leftJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<JoinResult<S, R, 'left'>> {
     return this.lazy().leftJoin(other, on)
   }
-  innerJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  innerJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<JoinResult<S, R, 'inner'>> {
     return this.lazy().innerJoin(other, on)
   }
-  semiJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  semiJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<S> {
     return this.lazy().semiJoin(other, on)
   }
-  antiJoin(other: LazyFrame | DataFrame, on: string | string[]): LazyFrame {
+  antiJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>, on: string | string[]): LazyFrame<S> {
     return this.lazy().antiJoin(other, on)
   }
-  crossJoin(other: LazyFrame | DataFrame): LazyFrame {
+  crossJoin<R extends Row>(other: LazyFrame<R> | DataFrame<R>): LazyFrame<JoinResult<S, R, 'cross'>> {
     return this.lazy().crossJoin(other)
   }
-  joinAsof(
-    other: LazyFrame | DataFrame,
+  joinAsof<R extends Row>(
+    other: LazyFrame<R> | DataFrame<R>,
     options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest' },
-  ): LazyFrame {
+  ): LazyFrame<JoinResult<S, R, 'left'>> {
     return this.lazy().joinAsof(other, options)
   }
-  fillNull(value: number | string | boolean, columns?: string[]): LazyFrame {
+  fillNull(value: number | string | boolean, columns?: string[]): LazyFrame<S> {
     return this.lazy().fillNull(value, columns)
   }
-  dropNull(columns?: string[]): LazyFrame {
+  dropNull(columns?: string[]): LazyFrame<S> {
     return this.lazy().dropNull(columns)
   }
-  melt(options: { idVars: string[]; valueVars: string[]; varName?: string; valueName?: string }): LazyFrame {
+  melt(options: { idVars: string[]; valueVars: string[]; varName?: string; valueName?: string }): LazyFrame<Row> {
     return this.lazy().melt(options)
   }
-  pivot(options: { index: string | string[]; columns: string; values: string; agg?: AggKind }): LazyFrame {
+  pivot(options: { index: string | string[]; columns: string; values: string; agg?: AggKind }): LazyFrame<Row> {
     return this.lazy().pivot(options)
   }
-  unique(columns?: string[], keep?: 'first' | 'last' | 'none'): LazyFrame {
+  unique(columns?: string[], keep?: 'first' | 'last' | 'none'): LazyFrame<S> {
     return this.lazy().unique(columns, keep)
   }
-  valueCounts(column: string, normalize?: boolean): LazyFrame {
+  valueCounts(column: string, normalize?: boolean): LazyFrame<Row> {
     return this.lazy().valueCounts(column, normalize)
   }
-  describe(options?: { quantileMethod?: QuantileMethod }): LazyFrame {
+  describe(options?: { quantileMethod?: QuantileMethod }): LazyFrame<Row> {
     return this.lazy().describe(options)
   }
-  corr(options?: { columns?: string[]; method?: CorrMethod }): LazyFrame {
+  corr(options?: { columns?: string[]; method?: CorrMethod }): LazyFrame<Row> {
     return this.lazy().corr(options)
   }
-  cov(options?: { columns?: string[] }): LazyFrame {
+  cov(options?: { columns?: string[] }): LazyFrame<Row> {
     return this.lazy().cov(options)
   }
 
-  withWindow(
-    name: string,
+  withWindow<N extends string>(
+    name: N,
     fn: 'rank' | 'lag' | 'lead' | 'cumsum' | 'rowNumber',
     options?: {
-      expr?: Expr
+      expr?: AnyExpr
       offset?: number
       /** rank only: tie handling, default 'average' (pandas / Minitab) */
       method?: RankMethod
       partitionBy?: string[]
-      orderBy?: Array<string | Expr | { expr: Expr; descending: boolean }>
+      orderBy?: Array<string | AnyExpr | { expr: AnyExpr; descending: boolean }>
     },
-  ): LazyFrame {
+  ): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
     return this.lazy().withWindow(name, fn, options)
   }
-  rolling(name: string, column: string, window: number, agg?: AggKind): LazyFrame {
+  rolling<N extends string>(name: N, column: keyof S & string, window: number, agg?: AggKind): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
     return this.lazy().rolling(name, column, window, agg)
   }
-  expanding(name: string, column: string, agg?: AggKind): LazyFrame {
+  expanding<N extends string>(name: N, column: keyof S & string, agg?: AggKind): LazyFrame<Simplify<Omit<S, N> & Record<N, number>>> {
     return this.lazy().expanding(name, column, agg)
   }
-  pipe<T>(fn: (df: DataFrame) => T): T {
+  pipe<T>(fn: (df: DataFrame<S>) => T): T {
     return fn(this)
   }
 
-  toCsv(): string {
-    return tableToCsv(this.table)
+  /**
+   * CSV text. `{ escapeFormulas: true }` neutralises text cells a spreadsheet would run as formulas
+   * (leading = + - @ tab CR → "'"-prefixed, quoted) — use it for exports of untrusted text that will be
+   * opened in Excel-like applications; the default writes the data unchanged.
+   */
+  toCsv(options: CsvWriteOptions = {}): string {
+    return tableToCsv(this.table, options)
   }
 
-  async writeCsv(path?: string): Promise<string> {
-    return writeCsvText(this.table, path)
+  /** Write CSV to a path (streamed, memory bounded by one chunk; resolves to '') or return the text when no path is given. */
+  async writeCsv(path?: string, options: CsvWriteOptions = {}): Promise<string> {
+    return writeCsvText(this.table, path, options)
   }
 
   async writeParquet(path?: string): Promise<Uint8Array> {
     return writeParquetBytes(this.table, path)
+  }
+
+  /** Write columna's JSON "parquet-like" format (round-trips with `readParquetLike`, not Apache Parquet). */
+  async writeParquetLike(path?: string): Promise<Uint8Array> {
+    return writeParquetLikeBytes(this.table, path)
   }
 
   toMarkdown(maxRows?: number): string {
@@ -707,54 +831,70 @@ export class DataFrame {
     return tableToHtml(this.table, maxRows)
   }
 
-  toBlob(format: 'csv' | 'parquet' = 'csv'): Blob {
-    if (format === 'csv') return new Blob([this.toCsv()], { type: 'text/csv' })
+  toBlob(format: 'csv' | 'parquet-like' = 'csv', options: CsvWriteOptions = {}): Blob {
+    if (format === 'csv') return new Blob([this.toCsv(options)], { type: 'text/csv' })
     const bytes = tableToParquetLike(this.table)
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
-    return new Blob([copy], { type: 'application/octet-stream' })
+    return new Blob([copy], { type: 'application/json' })
   }
 
   profile(): ProfileReport {
     return profileTable(this.table)
   }
-  engine(kind: EngineKind): LazyFrame {
-    return this.lazy().engine(kind)
+  engine(kind: EngineKind, options?: { strict?: boolean }): LazyFrame<S> {
+    return this.lazy().engine(kind, options)
   }
   explain(): string {
     return this.lazy().explain()
   }
+  collectWithReport(): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+    return this.lazy().collectWithReport()
+  }
 
-  collect(): Promise<DataFrame> {
+  collect(): Promise<DataFrame<S>> {
     return Promise.resolve(this)
   }
 
-  toArray(): Record<string, unknown>[] {
-    return toRowObjects(this.table)
+  /** Rows as objects, typed by the schema. */
+  toArray(): S[] {
+    return toRowObjects(this.table) as S[]
   }
 
   toArrow(): ArrowLike {
     return toArrowLike(this.table)
   }
 
-  getColumn(name: string): Series {
+  getColumn<K extends keyof S & string>(name: K): Series<Cell<S[K]>> {
     const idx = this.table.schema.findIndex((f) => f.name === name)
     if (idx < 0) throw new Error(`Unknown column "${name}"`)
     return new Series(name, this.table.columns[idx]!, this.table.numRows)
   }
 
-  static fromRows(rows: Record<string, unknown>[]): DataFrame {
-    if (rows.length === 0) return new DataFrame(tableFromColumns([]))
+  /**
+   * Build a frame from row objects. The schema is the union of the keys of every row, in order of first
+   * appearance (a key missing from a row reads as null); dtypes are inferred over the whole column, so a
+   * late fractional / out-of-Int32 / string value widens the column instead of being coerced.
+   */
+  static fromRows<T extends Row>(rows: readonly T[]): DataFrame<T> {
+    if (rows.length === 0) return new DataFrame<T>(tableFromColumns([]))
     const n = rows.length
     const names = Object.keys(rows[0]!)
-    const sampleLimit = Math.min(n, 256)
+    // Union of keys across rows (pandas semantics); the fast path is rows sharing the first row's shape.
+    const seen = new Set(names)
+    for (let i = 1; i < n; i++) {
+      const row = rows[i]!
+      for (const k in row) if (Object.hasOwn(row, k) && !seen.has(k)) {
+        seen.add(k)
+        names.push(k)
+      }
+    }
 
-    // Infer dtypes from a sample, then fill columnar buffers in one pass.
-    const dtypes: DType[] = names.map((name) => {
-      const sample: unknown[] = []
-      for (let i = 0; i < sampleLimit; i++) sample.push(rows[i]![name])
-      return inferDtype(sample)
-    })
+    // Infer dtypes from the full column (not a 256-row sample) so late floats/strings
+    // cannot be silently coerced into a wrong integer/utf8 layout.
+    const dtypes: DType[] = names.map((name) =>
+      inferDtypeFromValues(n, (i) => rows[i]![name]),
+    )
 
     const columns: Column[] = names.map((name, ci) => {
       const dtype = dtypes[ci]!
@@ -823,13 +963,13 @@ export class DataFrame {
         nullBitmap: anyNull ? nullBitmap : undefined,
       }
     })
-    return new DataFrame(tableFromColumns(columns))
+    return new DataFrame<any>(tableFromColumns(columns))
   }
 
-  static fromColumns(
-    cols: Record<
+  static fromColumns<
+    C extends Record<
       string,
-      | Array<number | string | boolean | null | Date>
+      | ReadonlyArray<number | string | boolean | null | Date>
       | Float64Array
       | Float32Array
       | Int32Array
@@ -837,14 +977,22 @@ export class DataFrame {
       | Uint8Array
       | { codes: Uint32Array; dictionary: string[] }
     >,
-  ): DataFrame {
+  >(cols: C, options: { copy?: boolean } = {}): DataFrame<InferColumns<C>> {
     const names = Object.keys(cols)
-    if (names.length === 0) return new DataFrame(tableFromColumns([]))
-    const colLen = (v: (typeof cols)[string]): number =>
+    if (names.length === 0) return new DataFrame<any>(tableFromColumns([]))
+    type Input =
+      | ReadonlyArray<number | string | boolean | null | Date>
+      | Float64Array
+      | Float32Array
+      | Int32Array
+      | Uint32Array
+      | Uint8Array
+      | { codes: Uint32Array; dictionary: string[] }
+    const colLen = (v: Input): number =>
       v && typeof v === 'object' && 'codes' in v && v.codes instanceof Uint32Array ? v.codes.length : (v as { length: number }).length
-    const length = colLen(cols[names[0]!]!)
+    const length = colLen(cols[names[0]!] as Input)
     const columns: Column[] = names.map((name) => {
-      const values = cols[name]!
+      const values = cols[name]! as Input
       if (colLen(values) !== length) throw new Error(`Column length mismatch for ${name}`)
 
       // Pre-encoded category (needed for 10M–100M row benches — avoid string[])
@@ -858,14 +1006,15 @@ export class DataFrame {
       ) {
         return {
           field: { name, dtype: 'category', nullable: false },
-          data: values.codes,
-          dictionary: values.dictionary,
+          data: options.copy ? values.codes.slice() : values.codes,
+          dictionary: options.copy ? values.dictionary.slice() : values.dictionary,
         } satisfies Column
       }
 
-      // Zero-copy path for typed numeric buffers without nulls
+      // Typed buffers are shared, not copied (README → "Buffer ownership"): the frame reads the caller's
+      // array, so a later write to that array changes the frame. Pass { copy: true } to detach.
       if (ArrayBuffer.isView(values) && !(values instanceof DataView)) {
-        const typed = values as Float64Array | Float32Array | Int32Array | Uint32Array | Uint8Array
+        const typed = (options.copy ? values.slice() : values) as Float64Array | Float32Array | Int32Array | Uint32Array | Uint8Array
         let dtype: DType = 'f64'
         if (typed instanceof Float32Array) dtype = 'f32'
         else if (typed instanceof Int32Array) dtype = 'i32'
@@ -918,22 +1067,28 @@ export class DataFrame {
         nullBitmap: anyNull ? nullBitmap : undefined,
       }
     })
-    return new DataFrame(tableFromColumns(columns))
+    return new DataFrame<any>(tableFromColumns(columns))
   }
 
-  static fromJSON(data: Record<string, unknown>[] | string, options: ReadJsonOptions = {}): DataFrame {
+  static fromJSON<S extends Row = Row>(data: Record<string, unknown>[] | string, options: ReadJsonOptions = {}): DataFrame<S> {
     if (typeof data !== 'string' && options.orient === undefined && !options.lines) {
-      return DataFrame.fromRows(data)
+      return DataFrame.fromRows(data) as DataFrame<S>
     }
-    return DataFrame.fromRows(parseJsonToRows(data, options))
+    return DataFrame.fromRows(parseJsonToRows(data, options)) as DataFrame<S>
   }
 
-  static fromArrow(arrow: ArrowLike): DataFrame {
-    return new DataFrame(fromArrowLike(arrow))
+  static fromArrow<S extends Row = Row>(arrow: ArrowLike): DataFrame<S> {
+    return new DataFrame<any>(fromArrowLike(arrow))
   }
 
   /** Sync parse of an in-memory CSV string (pandas/polars-style options). */
-  static fromCSV(csv: string, options: ReadCsvOptions = {}): DataFrame {
+  /** Parse CSV text. `S` is an assertion about the file, not something the compiler can verify. */
+  static fromCSV<S extends Row = Row>(csv: string, options: ReadCsvOptions = {}): DataFrame<S> {
+    return new DataFrame<S>(parseCsvToTable(csv, options))
+  }
+
+  /** @deprecated internal: previous row-object implementation of fromCSV, kept for parity tests. */
+  static fromCSVRows(csv: string, options: ReadCsvOptions = {}): DataFrame {
     return DataFrame.fromRows(parseCsvToRows(csv, { ...options, content: true }))
   }
 
@@ -943,23 +1098,29 @@ export class DataFrame {
   }
 
   /** Read CSV from path, URL, string content, or bytes. */
-  static async readCsv(source: IoSource, options: ReadCsvOptions = {}): Promise<DataFrame> {
+  /** Read CSV from a path / URL / bytes / text. `S` is an assertion about the file, not something the compiler can verify. */
+  static async readCsv<S extends Row = Row>(source: IoSource, options: ReadCsvOptions = {}): Promise<DataFrame<S>> {
+    return new DataFrame<S>(await readCsvTable(source, options), getDefaultRuntime())
+  }
+
+  /** @deprecated internal: previous row-object implementation of readCsv, kept for parity tests. */
+  static async readCsvRows(source: IoSource, options: ReadCsvOptions = {}): Promise<DataFrame> {
     return DataFrame.fromRows(await readCsvRows(source, options))
   }
 
   /** Read JSON / NDJSON from path, URL, string content, or bytes. */
-  static async readJson(source: IoSource, options: ReadJsonOptions = {}): Promise<DataFrame> {
-    return DataFrame.fromRows(await readJsonRows(source, options))
+  static async readJson<S extends Row = Row>(source: IoSource, options: ReadJsonOptions = {}): Promise<DataFrame<S>> {
+    return DataFrame.fromRows(await readJsonRows(source, options)) as DataFrame<S>
   }
 
   /** Read Excel (.xls / .xlsx) from path, URL, or bytes. */
-  static async readExcel(source: IoSource, options: ReadExcelOptions = {}): Promise<DataFrame> {
-    return DataFrame.fromRows(await readExcelRows(source, options))
+  static async readExcel<S extends Row = Row>(source: IoSource, options: ReadExcelOptions = {}): Promise<DataFrame<S>> {
+    return DataFrame.fromRows(await readExcelRows(source, options)) as DataFrame<S>
   }
 
   /** Read Parquet from path, URL, or bytes. */
-  static async readParquet(source: IoSource, options: ReadParquetOptions = {}): Promise<DataFrame> {
-    return DataFrame.fromRows(await readParquetRows(source, options))
+  static async readParquet<S extends Row = Row>(source: IoSource, options: ReadParquetOptions = {}): Promise<DataFrame<S>> {
+    return DataFrame.fromRows(await readParquetRows(source, options)) as DataFrame<S>
   }
 
   /**

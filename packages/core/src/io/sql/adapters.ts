@@ -1,4 +1,5 @@
 import type { SqlClient, SqlConnectionConfig, SqlParams } from './types.js'
+import { setRowField } from '@columna/arrow'
 import { hostPortFromUrl, importDriver, missingDriverMessage } from './util.js'
 
 type PgModule = {
@@ -45,17 +46,24 @@ export async function connectPostgres(config: SqlConnectionConfig): Promise<SqlC
   }
 }
 
+/**
+ * MS SQL Server via `mssql`. Each call creates its **own** `ConnectionPool` for exactly this configuration.
+ * `sql.connect(cfg)` must not be used here: it binds the driver's process-wide global pool, and once that pool
+ * is connected a second call with a different config silently returns the *first* pool — a query meant for
+ * database B would run against database A, and closing it would close the pool under other callers.
+ */
 export async function connectMssql(config: SqlConnectionConfig): Promise<SqlClient> {
-  type MssqlMod = {
-    connect: (cfg: unknown) => Promise<MssqlPool>
-    close?: () => Promise<void>
-  }
   type MssqlPool = {
+    connect: () => Promise<MssqlPool>
     request: () => {
       input: (name: string, value: unknown) => unknown
       query: (sql: string) => Promise<{ recordset: Record<string, unknown>[] }>
     }
     close: () => Promise<void>
+  }
+  type MssqlMod = {
+    ConnectionPool: new (cfg: unknown) => MssqlPool
+    default?: { ConnectionPool: new (cfg: unknown) => MssqlPool }
   }
 
   const sql = await importDriver<MssqlMod>('mssql', 'mssql')
@@ -92,7 +100,10 @@ export async function connectMssql(config: SqlConnectionConfig): Promise<SqlClie
     }
   }
 
-  const pool = await sql.connect(cfg)
+  const ConnectionPool = sql.ConnectionPool ?? sql.default?.ConnectionPool
+  if (!ConnectionPool) throw new Error(missingDriverMessage('mssql', 'mssql'))
+  // Dedicated pool owned by this client: isolated from the driver's global pool and from other configs.
+  const pool = await new ConnectionPool(cfg).connect()
   return {
     async query(queryText, params) {
       const req = pool.request()
@@ -238,15 +249,16 @@ export async function connectSqlite(config: SqlConnectionConfig): Promise<SqlCli
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(row)) {
+    // setRowField: a column named "__proto__" must become a property, not the row's prototype
     if (typeof v === 'bigint') {
       const n = Number(v)
-      out[k] = Number.isSafeInteger(n) ? n : v.toString()
+      setRowField(out, k, Number.isSafeInteger(n) ? n : v.toString())
     } else if (v instanceof Date) {
-      out[k] = v.getTime()
+      setRowField(out, k, v.getTime())
     } else if (isNodeBuffer(v)) {
-      out[k] = new Uint8Array(v as Uint8Array)
+      setRowField(out, k, new Uint8Array(v as Uint8Array))
     } else {
-      out[k] = v
+      setRowField(out, k, v)
     }
   }
   return out

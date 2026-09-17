@@ -26,8 +26,10 @@ export type {
   SqlParams,
 } from '@columna/core'
 export type { ArrowLike, DType, Schema, TableView } from '@columna/arrow'
-export type { AggKind, CorrMethod, EngineKind, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
+export type { AggKind, CorrMethod, EngineKind, ExecutionEvent, ExecutionReport, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
 export {
+  EngineStrictError,
+  formatExecutionReport,
   Runtime,
   getDefaultRuntime,
   setDefaultRuntime,
@@ -44,9 +46,18 @@ export { isRustKernelsLoaded } from '@columna/wasm'
 let bootstrapped = false
 let webgpuBackend: WebGpuBackend | null = null
 
-/** Register WASM + WebGPU backends on the default runtime (idempotent). */
-export async function init(options: { rust?: boolean; native?: boolean } = {}): Promise<Runtime> {
+/**
+ * Start the optional infrastructure — this is the only place it starts. Importing `columna` has no side
+ * effects beyond registering inert backend objects; `init()` requests the WebGPU adapter / device, loads the
+ * native Node addon and the Rust WASM kernels when they are available, and resolves when all of that is
+ * settled. Without it the CPU engine handles everything, deterministically.
+ * `gpuLossyF32: true` lets the WebGPU filter / map kernels run f64 and datetime columns (and literals the
+ * column type cannot represent) in float32 — faster, but the GPU may then return different rows than the
+ * CPU (16 777 217 rounds to 16 777 216). Off by default: results are identical across backends.
+ */
+export async function init(options: { rust?: boolean; native?: boolean; gpuLossyF32?: boolean } = {}): Promise<Runtime> {
   const runtime = getDefaultRuntime()
+  if (webgpuBackend && options.gpuLossyF32 !== undefined) webgpuBackend.options.lossyF32 = options.gpuLossyF32
   if (!bootstrapped) {
     runtime.register(new WasmBackend(executeCpu))
     webgpuBackend = new WebGpuBackend(executeCpu)
@@ -69,7 +80,9 @@ export async function isWebGpuAvailable(): Promise<boolean> {
   return webgpuBackend.waitReady()
 }
 
-// Eager sync registration so `import 'columna'` already has backends.
+// Registration at import is inert: constructing the backends allocates two objects and nothing else.
+// No adapter request, no worker, no native module load happens until `init()` — until then every plan
+// runs on the CPU engine, and `engine('webgpu')` without `init()` reports "does not support this plan".
 getDefaultRuntime().register(new WasmBackend(executeCpu))
 webgpuBackend = new WebGpuBackend(executeCpu)
 getDefaultRuntime().register(webgpuBackend)

@@ -68,16 +68,15 @@ export function parseCsvLine(line: string, delimiter: string, quoteChar = '"'): 
   return out
 }
 
-function coerceValue(
-  raw: string,
-  opts: {
-    nullValues: Set<string>
-    trueValues: Set<string>
-    falseValues: Set<string>
-    decimal: string
-    thousands?: string
-  },
-): unknown {
+export type CoerceOptions = {
+  nullValues: Set<string>
+  trueValues: Set<string>
+  falseValues: Set<string>
+  decimal: string
+  thousands?: string
+}
+
+export function coerceValue(raw: string, opts: CoerceOptions): unknown {
   let s = raw.trim()
   if (opts.nullValues.has(s) || opts.nullValues.has(s.toLowerCase())) return null
   if (opts.trueValues.has(s) || opts.trueValues.has(s.toLowerCase())) return true
@@ -85,7 +84,12 @@ function coerceValue(
   if (opts.thousands) s = s.split(opts.thousands).join('')
   if (opts.decimal !== '.') s = s.replace(opts.decimal, '.')
   if (s === '') return null
-  if (/^[+-]?\d+$/.test(s)) return Number(s)
+  if (/^[+-]?\d+$/.test(s)) {
+    const n = Number(s)
+    // An integer beyond 2^53 cannot be held exactly in a JS number (there is no int64 dtype): keep the digits
+    // as text rather than silently rounding an identifier. Pass dtypes: { col: 'f64' } to force a number.
+    return Number.isSafeInteger(n) ? n : s
+  }
   if (/^[+-]?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(s)) return Number(s)
   return raw.trim() === '' ? null : raw
 }
@@ -96,10 +100,10 @@ function applyDtypes(rows: Record<string, unknown>[], dtypes: Record<string, DTy
       if (!(name in row)) continue
       const v = row[name]
       if (v === null || v === undefined) continue
-      if (dtype === 'bool') row[name] = Boolean(v)
-      else if (dtype === 'utf8' || dtype === 'category') row[name] = String(v)
-      else if (dtype === 'datetime') row[name] = typeof v === 'number' ? v : Date.parse(String(v))
-      else row[name] = Number(v)
+      if (dtype === 'bool') setRowField(row, name, Boolean(v))
+      else if (dtype === 'utf8' || dtype === 'category') setRowField(row, name, String(v))
+      else if (dtype === 'datetime') setRowField(row, name, typeof v === 'number' ? v : Date.parse(String(v)))
+      else setRowField(row, name, Number(v))
     }
   }
 }

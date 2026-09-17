@@ -23,6 +23,24 @@ Open in **Chrome/Edge** for Open Folder (File System Access API).
 - Variable Explorer + detached editable DataFrame window
 - Plots, History, Help, layout persistence
 
+## Trust model — read before opening someone else's project
+
+Studio is a **REPL**, not a sandbox. Code you run (console input, `F5` on a file, cells, debug runs) executes as
+`AsyncFunction` in the page itself, with everything the page can do: read and write the folder you opened via
+the File System Access API, use `localStorage` / IndexedDB of the origin, make network requests as the page,
+and reach every DataFrame in the session. This is the same power the browser devtools console has.
+
+Consequences:
+
+- Treat a project, notebook or file from someone else exactly like a script you would run on your machine.
+  Do not open it in Studio unless you would run it.
+- Do not host Studio for other people. The dev server binds to `127.0.0.1` on purpose; `vite --host` turns every
+  device on the network into a local user of your browser session.
+- Moving execution into a Web Worker or an iframe would **not** create a trust boundary: same origin, same
+  storage, same handles passed over `postMessage`, same `fetch`. A real isolation layer (separate origin with
+  a restrictive CSP, capability-scoped bridge, no direct handle access, resource limits) would be a separate
+  design and is not on the roadmap.
+
 ## Shortcuts
 
 | Shortcut | Action |

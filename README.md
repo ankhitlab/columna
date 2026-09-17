@@ -1,6 +1,8 @@
 # columna
 
-Fluent DataFrame library for TypeScript — pandas-like analytics with **WebGPU → WASM → CPU** backends. Aimed at TypeScript/JavaScript developers who want a typed, fluent tabular API in Node.js and modern browsers.
+Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary and no runtime dependencies in the core.
+
+The DataFrame part competes with Arquero (same job; on 2M rows columna is 5–10× faster per operation and uses ~3× less memory), overlaps with DuckDB-Wasm (which is a real SQL engine and reads files faster) and is not a substitute for Polars or DuckDB native when a server can run one. What none of them have is the statistics layer: ~250 procedures — hypothesis tests, ANOVA, regression with full diagnostics, DOE, SPC, capability, reliability, time series, multivariate — each checked against scipy / numpy / NIST references. Measured comparison and an honest "when to use what": [docs/positioning.md](docs/positioning.md).
 
 ```ts
 import { DataFrame, col } from 'columna'
@@ -21,9 +23,9 @@ const out = await DataFrame.fromRows([
 ## Features
 
 - Fluent, lazy-friendly DataFrame API with expression DSL (`col`, `when`, string/datetime helpers)
-- Pluggable compute backends: WebGPU (when available), WASM, and CPU
+- Compute backends: CPU (typed kernels, optional native addon and worker parallelism in Node), with narrow WebGPU / WASM accelerations that report what they actually ran (see Engines)
 - IO for CSV / JSON / Excel / Parquet; optional SQL and Kafka batch reads via peer drivers
-- Separate advanced statistics module (`columna/advanced`) for tests, regression, SPC, DOE, and related workflows
+- `columna/advanced`: Minitab-level statistics (~250 procedures) with fixture, property and Monte-Carlo tests
 - Dual ESM / CommonJS builds with TypeScript declarations
 - Optional browser IDE: Columna Studio (workspace app)
 
@@ -164,6 +166,34 @@ const pq = await DataFrame.readParquet('./events.parquet', { columns: ['ts', 'va
 
 Sync helpers for in-memory strings remain: `fromCSV`, `fromJSON`.
 
+### Saying what a source is, and fencing it in
+
+A bare string is classified by a heuristic (`http(s)://` → fetch, path-like → file, otherwise content). That is
+fine for a script and wrong for a server: a string taken from a request could name any URL or file the process
+can reach. Say what it is, and set boundaries — per call or once for the process:
+
+```ts
+import { DataFrame, io, setIoPolicy } from 'columna'
+
+await DataFrame.readCsv({ text: body })                 // content, never a path — also io.text(body) / { mode: 'text' }
+await DataFrame.readCsv({ path: file })                 // filesystem — io.path(file)
+await DataFrame.readJson({ url: link }, {               // network — io.url(link)
+  allowedHosts: ['data.example.com', '*.cdn.example.com'],
+  denyPrivateHosts: true,                               // no loopback / RFC 1918 / link-local / cloud metadata
+  maxBytes: 50e6,                                       // body is read incrementally and cut off past the cap
+  timeoutMs: 10_000,
+  signal: controller.signal,
+})
+
+// process-wide floor: per-call options can only narrow it, never widen it
+setIoPolicy({ allowedDirs: ['/srv/data'], allowedHosts: ['data.example.com'], maxBytes: 100e6, timeoutMs: 30_000 })
+```
+
+`allowedDirs` compares real paths (symlinks cannot escape); `file://` URLs are filesystem reads under the same rule;
+every redirect hop is checked against `allowedHosts` / `denyPrivateHosts`; URLs with embedded credentials and
+non-http(s) protocols are refused. `denyPrivateHosts` is a name check, not DNS — for DNS-rebinding protection pass
+your own `fetch` (it receives `{ redirect: 'manual', signal }`).
+
 ## Databases
 
 `DataFrame.readSql` / `readDatabase` (pandas `read_sql` / polars `read_database`):
@@ -177,7 +207,7 @@ Sync helpers for in-memory strings remain: `fromCSV`, `fromJSON`.
 | SQLite | `./file.db`, `:memory:`, `sqlite://…` | `better-sqlite3` |
 
 ```ts
-import { DataFrame } from 'columna'
+import { DataFrame, openSqlClient } from 'columna'
 
 // URL
 const df = await DataFrame.readSql('SELECT * FROM events WHERE day = $1', 'postgres://…/analytics', {
@@ -194,8 +224,17 @@ const ch = await DataFrame.readSql(
 const df2 = await DataFrame.readSql('SELECT 1 AS x', {
   query: async (sql) => [{ x: 1 }],
 })
+
+// Reuse one connection across reads: open it yourself, pass it in, close it when done.
+// readSql never closes a client it was given. Each openSqlClient() is a dedicated connection / pool —
+// two MS SQL databases can be open side by side (the driver's global pool is never used).
+const client = await openSqlClient('mssql://user:pass@host/db_a')
+const a = await DataFrame.readSql('SELECT * FROM orders', client)
+const b = await DataFrame.readSql('SELECT * FROM customers', client)
+await client.close?.()
 ```
 
+A URL or config passed straight to `readSql` opens a connection for that call and closes it afterwards.
 Install only the drivers you need, e.g. `pnpm add pg` or `pnpm add @clickhouse/client`.
 
 ## Kafka
@@ -226,12 +265,75 @@ const df2 = await DataFrame.readKafka('kafka://localhost:9092/events?fromBeginni
 
 Stop conditions: `nMessages` (default 1000) or `maxWaitMs` (default 10s), whichever comes first.
 
+## Typed schemas
+
+A frame carries its row type. `fromRows` / `fromColumns` infer it; every column-changing operation computes the
+next one, so the compiler knows which columns exist, what `toArray()` returns, and rejects a misspelt name:
+
+```ts
+const df = DataFrame.fromRows([{ city: 'Berlin', age: 30, salary: 72000 }])
+//    ^ DataFrame<{ city: string; age: number; salary: number }>
+
+const out = await df
+  .filter((c) => c.age.gt(18))                       // c: typed column refs — c.age is Expr<number, 'age'>
+  .withColumn('k', (c) => c.salary.div(1000))        // schema gains k: number
+  .rename({ city: 'town' })                          // schema: town, age, salary, k
+  .select('town', 'k')                               // only known names compile
+  .collect()
+out.toArray()                                        // Array<{ town: string; k: number }>
+
+df.select('cty')                 // error: '"cty"' is not assignable to '"city" | "age" | "salary"'
+df.filter((c) => c.salary)       // error: Expr<number> is not a predicate (Expr<boolean> required)
+df.groupBy('city').agg((c) => ({ n: c.age.count(), pay: c.salary.mean() }))
+//                                                   // LazyFrame<{ city: string; n: number; pay: number }>
+df.join(regions, { on: 'city' })                     // LazyFrame<L & R>; leftJoin makes R's columns | null
+```
+
+What is and is not checked:
+
+- `col('x')` is untyped on purpose (`Expr<any>`): a string names a column the compiler knows nothing about. It
+  still composes everywhere; only typed results are checked (`col('x').add(1)` is rejected as a predicate).
+  `cols<S>()` gives typed refs outside callbacks.
+- Readers (`readCsv` / `readJson` / …) return `DataFrame<Row>`. `readCsv<S>(…)` is an **assertion** by the caller —
+  the file is not validated against `S`.
+- Joins do not model suffixes for colliding non-key columns; `melt`, `pivot`, `transpose`, `describe`, `valueCounts`,
+  `corr` return `LazyFrame<Row>` (their columns depend on data).
+- Untyped code keeps compiling: every generic defaults to `Row` = `Record<string, unknown>`.
+
+The type-level guarantees are themselves tested (`packages/core/tests/schema-types.test.ts` runs under `tsc` with
+`@ts-expect-error` lines, as part of `pnpm typecheck`).
+
+### Type system: what exists and what does not
+
+`DType` is `f64 | f32 | i32 | u32 | bool | utf8 | category | datetime`. Not available: **int64 / uint64** (integers past
+2⁵³ are kept as text by the CSV / Parquet / SQL readers rather than rounded; there is no BigInt column), **decimal**
+(no fixed-point arithmetic — money in f64 rounds), **list / struct** (`explode` / `unnest` flatten JSON-shaped input on
+the way in; nested values are not a column type), **time zones** (`datetime` is epoch milliseconds, UTC arithmetic only).
+Pick a different tool for those, or model them as text.
+
+### Buffer ownership
+
+`fromColumns` **shares** typed arrays and pre-encoded category codes zero-copy: the frame reads your buffer, so writing
+to it later changes the frame, and a `readonly TableView` does not freeze its contents. Pass `{ copy: true }` to detach.
+Everything the library produces (operations, readers) is owned by the library and never aliases user memory. The GPU
+buffer cache is keyed by array identity: a buffer mutated after its first upload is *not* re-uploaded — treat shared
+buffers as immutable once handed over, or copy.
+
+### Importing has no side effects
+
+`import { DataFrame } from 'columna'` registers inert backend objects and nothing else — no WebGPU adapter request,
+no worker, no native module load. Until `await init()` every plan runs on the CPU engine deterministically, and
+`engine('webgpu')` reports "does not support this plan" in strict mode. `init()` is the single place infrastructure starts.
+
 ## Expressions & transforms
 
 ```ts
 import { DataFrame, col, when } from 'columna'
 
 const df = DataFrame.fromRows([{ name: 'Ada', x: 3, ts: Date.UTC(2024, 0, 15) }])
+// fromRows (and every reader built on it: CSV, JSON, Excel, Parquet, SQL, Kafka) infers each dtype over the
+// whole column - a late 1.5, 2^31 or 'n/a' widens the column to f64 / utf8 instead of being coerced - and the
+// schema is the union of all rows' keys (missing -> null). cast('i32' | 'u32') throws on overflow / fractions.
 
 await df
   .withColumns(
@@ -278,10 +380,13 @@ await df.tail(5).sample({ n: 10, seed: 1 }).collect()
 await left.semiJoin(right, 'id').crossJoin(dims).collect()
 
 df.toCsv()
-await df.writeParquet('./out.parquet')
+df.toCsv({ escapeFormulas: true })  // neutralise =, +, -, @ cells for Excel-bound exports of untrusted text
+await df.writeParquetLike('./out.columna.json')  // custom JSON format; Apache Parquet writer not yet available
 df.toMarkdown()
 df.profile()
 ```
+
+> **Note:** `writeParquet()` previously wrote a JSON payload while `readParquet()` reads real Apache Parquet via hyparquet — that mismatch is now an explicit error. Use `writeParquetLike()` for the JSON format.
 
 ## Advanced statistics (`columna/advanced`)
 
@@ -452,11 +557,59 @@ Options: `alternative: 'two-sided' | 'less' | 'greater'`, `confidence` (default 
 The same tests work on plain arrays: `ttest1`, `ttest2`, `ttestPaired`, `anova({ a: [...], b: [...] })`, `chi2test([[30, 10], [20, 25]])`, `chi2gof(observed, expected?)`, `crosstab(a, b)`, `andersonDarling(x)`, `ryanJoiner(x)`, `kolmogorovSmirnov(x)`, `shapiroWilk(x)`, `tukeyHSD(groups)`, `fisherLSD(groups)`, `dunnett(groups, { control })`, `hsuMCB(groups, { best })`, `levene(groups)`, `bartlett(groups)`, `bonett(groups)`, `varTest2(a, b)`, `bonett2(a, b)` (2 Variances, Bonett's method with CI for the ratio), `mannWhitney(a, b, { alternative, method })`, `kruskal(groups)`, `ztest1(x, { sigma })`, `varTest1(x, { sigma0 })`, `corrTest(a, b)`, `grubbs(x)`, `dixon(x)`, `signTest(x)`, `wilcoxonSigned(x)`, `moodMedian(groups)`, `friedman(table)`, `runsTest(x)`, `tost1(x, { limits })`, `tost2(a, b, { limits })`, `tostPaired(a, b, { limits })`.
 The studentized range distribution is exported as `ptukey(q, k, df)` / `qtukey(p, k, df)` (R names; matches scipy `studentized_range` to ~1e-7), Dunnett's as `pdunnett(c, lambdas, df)` / `qdunnett(p, lambdas, df)`.
 
-## Engines
+## Engines — what a backend name guarantees
 
-Prefer `.engine('webgpu' | 'wasm' | 'cpu')` or let runtime auto-pick. Use `.explain()` to inspect the plan.
+`.engine('webgpu' | 'wasm' | 'cpu')` is a **request**, not a guarantee. Every backend is a hybrid over the same CPU
+planner, and by default an engine that cannot run a node hands it to the CPU without a word. The honest picture:
+
+| Engine | Executes on its own | Everything else |
+|---|---|---|
+| `cpu` | all nodes: typed JS kernels; optional native Rust addon (filter ≥ 1M rows, gather ≥ 250k, join / groupBy ≥ 500k, strings ≥ 10M) and worker-thread parallelism (dual filter ≥ 50M rows, gather ≥ 2M) — Node only, browsers stay single-threaded | — |
+| `wasm` | one kernel family: `col OP n AND col OP n` filters on i32×f64 / i32×i32 / f64×f64 columns, **≥ 5M rows**, and only when the Rust `pkg` is built and loaded | CPU |
+| `webgpu` | AND-filters over i32 / u32 / f32 columns and `col ARITH n` maps on f32 columns (exact; f64 / datetime need `gpuLossyF32`); rows ≥ 10 000 | CPU — including mask → indices and the row gather *after* every GPU filter |
+
+Two tools make the difference visible:
+
+```ts
+// 1. the execution report: what ran, where, why not, how long (GPU: transfer vs compute vs CPU gather)
+const { frame, report } = await df.lazy().filter(...).engine('wasm').collectWithReport()
+console.log(formatExecutionReport(report))
+// requested: wasm · dispatched: wasm · used: cpu · 41.2 ms
+//   filter: cpu 40.9 ms rows=812345 — 2000000 rows < WASM_RUST_FILTER_MIN_ROWS (5000000); JS kernels are faster below that
+
+// 2. strict mode: the engine must do the work or the call fails with EngineStrictError listing the reasons
+await df.lazy().filter(...).engine('webgpu', { strict: true }).collect()
+```
+
+`.explain()` prints the plan and the backend it is *dispatched* to; only `collectWithReport()` knows what executed.
+A benchmark that does not read the report may be timing JavaScript under a WASM label.
+
+### Memory and scale
+
+Rows are cheap to count and expensive to hold. Rule of thumb for peak memory: **the columns** (8 bytes per f64 / datetime
+cell, 4 per i32 / u32 / f32 / category code, 1 per bool, plus a JS string per utf8 cell) **plus the largest intermediate**
+of the operation (a sort or join materialises index arrays; a groupBy its accumulators). 100M rows × 8 f64 columns is
+6.4 GB of buffers before any operation — state a schema, an operation and a peak RSS with any row count.
+
+- **CSV in**: `readCsv({ path })` streams the file in 1 MB chunks straight into typed column builders — no row objects,
+  no full-text copy; text columns are dictionary-encoded on the fly. 2M rows × 8 columns (107 MB CSV): 2.9 s, peak RSS
+  477 MB vs 4.2 s / 990 MB for the previous row-object path (Node 24, single thread; `pnpm bench:e2e`).
+  `nRows` stops the read early; `maxBytes` is enforced on bytes read.
+- **CSV out**: `writeCsv(path)` streams 16 384-row chunks with back-pressure; only one chunk of cell strings exists at a
+  time. `toCsv()` necessarily builds the whole string.
+- **JSON / Excel / Parquet in**: still whole-file → row objects → columns (Parquet no longer copies the input buffer). Budget
+  roughly 3–5× the file size in peak RSS for these.
+- **SQL**: `nRows` slices the driver's result **after** it arrived — it bounds the DataFrame, not the query, the transfer
+  or the driver's buffer. Put `LIMIT` in the SQL for that.
+- **Browser**: WebGPU / WASM do not make the main thread asynchronous; a 10M-row groupBy blocks the UI for as long as it
+  takes. Measure bundle size, device init (`await init()`) and main-thread blocking, not only kernel time.
+
+`pnpm bench:e2e` measures the way a deployment decision needs: cold (fresh process) and warm runs, read → process → write,
+peak RSS sampled during the run, and the backend that actually executed each node.
 
 WebGPU runs a **hybrid** plan: numeric AND-filters and col∋lit maps on the GPU (with buffer residency), other ops on CPU. Call `await init()` so the device is ready before `collect()`.
+
+GPU results are **bit-identical to the CPU**: the filter kernel compares `i32` / `u32` / `f32` columns in their own type (no float32 rounding of integers past 2^24) and honours the null bitmap; `f64` / `datetime` columns, bool / category columns and literals the column type cannot hold exactly (`x > 2.5` on `i32`, `x > 0.1` on `f32`) stay on the CPU. `init({ gpuLossyF32: true })` opts into the approximate float32 path for those cases.
 
 ## Contributing
 

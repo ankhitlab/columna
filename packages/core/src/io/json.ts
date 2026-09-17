@@ -56,7 +56,7 @@ export function parseJsonToRows(data: unknown, options: ReadJsonOptions = {}): R
     const names = Array.from({ length: width }, (_, i) => `column_${i}`)
     return sliced.map((cells) => {
       const row: Record<string, unknown> = {}
-      for (let i = 0; i < width; i++) row[names[i]!] = cells[i] ?? null
+      for (let i = 0; i < width; i++) setRowField(row, names[i]!, cells[i] ?? null)
       return row
     })
   }

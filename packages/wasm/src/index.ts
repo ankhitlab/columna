@@ -15,7 +15,7 @@ import {
   takeColumn,
   type TableView,
 } from '@columna/arrow'
-import type { Backend, PlanNode } from '@columna/runtime'
+import type { Backend, ExecContext, PlanNode } from '@columna/runtime'
 
 export interface WasmKernels {
   filterMask(values: Float64Array, op: number, literal: number, nullBitmap?: Uint8Array): Uint8Array
@@ -183,10 +183,22 @@ function asF64(col: ReturnType<typeof getColumn>, numRows: number): Float64Array
 void asF64 // kept for potential single-col rust paths
 
 
+/** Rows below which the JS kernels beat the Rust dual filter (copy-in cost is not amortised). */
+export const WASM_RUST_FILTER_MIN_ROWS = 5_000_000
+
 /**
  * Hybrid: Rust typed dual-filter when available; else CPU planner (fusion / dense join).
+ * Every decision is traced into `ctx` so a report shows whether Rust did anything at all.
  */
-function executeWithKernels(plan: PlanNode, fallback: (p: PlanNode) => TableView): TableView {
+function executeWithKernels(plan: PlanNode, fallback: (p: PlanNode) => TableView, ctx?: ExecContext): TableView {
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const delegate = (reason: string): TableView => {
+    const out = fallback(plan)
+    ctx?.trace({ node: plan.type, backend: 'cpu', reason, ms: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0, rows: out.numRows })
+    return out
+  }
+  if (plan.type !== 'filter') return delegate('wasm has kernels for filter nodes only')
+  if (!rustLoaded) return delegate('Rust kernels not loaded (tryLoadRustKernels / pkg missing) — TypeScript kernels are the CPU engine')
   if (
     plan.type === 'filter' &&
     plan.predicate.type === 'binary' &&
@@ -211,35 +223,45 @@ function executeWithKernels(plan: PlanNode, fallback: (p: PlanNode) => TableView
       if (opA !== undefined && opB !== undefined) {
         const input = fallback(plan.input)
         // Rust dual-filter wins when n is large enough to amortize copy_to; else JS kernels are faster.
-        if (input.numRows < 5_000_000) return fallback(plan)
+        if (input.numRows < WASM_RUST_FILTER_MIN_ROWS) return delegate(`${input.numRows} rows < WASM_RUST_FILTER_MIN_ROWS (${WASM_RUST_FILTER_MIN_ROWS}); JS kernels are faster below that`)
         const ca = getColumn(input, left.left.name)
         const cb = getColumn(input, right.left.name)
         let idx: Uint32Array | null = null
+        let kernel = ''
         if (
           ca.data instanceof Int32Array &&
           cb.data instanceof Float64Array &&
           activeKernels.filterAnd2I32F64
         ) {
           idx = activeKernels.filterAnd2I32F64(ca.data, cb.data, opA, left.right.value, opB, right.right.value)
+          kernel = 'rust:filterAnd2I32F64'
         } else if (
           ca.data instanceof Int32Array &&
           cb.data instanceof Int32Array &&
           activeKernels.filterAnd2I32I32
         ) {
           idx = activeKernels.filterAnd2I32I32(ca.data, cb.data, opA, left.right.value, opB, right.right.value)
+          kernel = 'rust:filterAnd2I32I32'
         } else if (
           ca.data instanceof Float64Array &&
           cb.data instanceof Float64Array &&
           activeKernels.filterMaskAnd2
         ) {
           idx = activeKernels.filterMaskAnd2(ca.data, cb.data, opA, left.right.value, opB, right.right.value)
+          kernel = 'rust:filterMaskAnd2'
         }
-        if (idx) return tableFromColumns(input.columns.map((c) => takeColumn(c, idx!)))
+        if (idx) {
+          const out = tableFromColumns(input.columns.map((c) => takeColumn(c, idx!)))
+          ctx?.trace({ node: 'filter', backend: 'wasm', kernel, ms: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0, rows: out.numRows })
+          return out
+        }
+        return delegate(`no Rust kernel for column types ${ca.field.dtype} × ${cb.field.dtype} (i32×f64, i32×i32, f64×f64 only)`)
       }
+      return delegate('comparison operator not supported by the Rust dual filter')
     }
+    return delegate('predicate is not "col OP number AND col OP number"')
   }
-
-  return fallback(plan)
+  return delegate('predicate is not an AND of two numeric comparisons')
 }
 
 export class WasmBackend implements Backend {
@@ -256,8 +278,8 @@ export class WasmBackend implements Backend {
     return true
   }
 
-  execute(plan: PlanNode): TableView {
-    return executeWithKernels(plan, this.fallbackExecute)
+  execute(plan: PlanNode, ctx?: ExecContext): TableView {
+    return executeWithKernels(plan, this.fallbackExecute, ctx)
   }
 }
 

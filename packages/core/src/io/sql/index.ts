@@ -12,6 +12,7 @@ import type {
   SqlConnectionConfig,
   SqlDialect,
 } from './types.js'
+import { setRowField } from '@columna/arrow'
 import { resolveDialect } from './util.js'
 
 export type {
@@ -58,6 +59,20 @@ async function openClient(config: SqlConnectionConfig, dialect: SqlDialect): Pro
 }
 
 /**
+ * Open a dedicated driver client / pool for a URL or config. The caller owns it: pass it to `readSql` as
+ * many times as needed (readSql never closes a client it was given) and call `close()` when done. This is the
+ * supported way to share one connection across reads; with MS SQL Server it is also the only way to hold two
+ * databases open at once (each client has its own `ConnectionPool`, nothing touches the driver's global pool).
+ */
+export async function openSqlClient(
+  connection: string | SqlConnectionConfig,
+  options: { dialect?: SqlDialect } = {},
+): Promise<SqlClient> {
+  const config = asConfig(connection)
+  return openClient(config, resolveDialect(config, options.dialect))
+}
+
+/**
  * Execute SQL and return row objects.
  *
  * `connection` may be:
@@ -93,11 +108,11 @@ function normalizeSqlRow(row: Record<string, unknown>): Record<string, unknown> 
   for (const [k, v] of Object.entries(row)) {
     if (typeof v === 'bigint') {
       const n = Number(v)
-      out[k] = Number.isSafeInteger(n) ? n : v.toString()
+      setRowField(out, k, Number.isSafeInteger(n) ? n : v.toString())
     } else if (v instanceof Date) {
-      out[k] = v.getTime()
+      setRowField(out, k, v.getTime())
     } else {
-      out[k] = v
+      setRowField(out, k, v)
     }
   }
   return out
