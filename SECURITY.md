@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-This project has not yet published a stable release line. Until then, security fixes target the default branch (`main` / `master`) and the latest published `columna` version on npm (currently `0.2.0`).
+This project has not yet published a stable release line. Until then, security fixes target the default branch (`main` / `master`) and the latest published `columna` version on npm (currently `0.2.1`).
 
 After the first public release, this section should list which released versions still receive security updates.
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-17
+
+Republish of the 0.2.0 contents after the initial `0.2.0` tarball stalled in the npm registry staging queue.
+
 ## [0.2.0] - 2026-09-17
 
 ### Added
