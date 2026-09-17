@@ -8,7 +8,8 @@
  * checksum is printed, not hidden.
  *
  *   pnpm --filter @columna/bench run compare:js               # 2M rows × 8 columns
- *   E2E_ROWS=500000 pnpm --filter @columna/bench run compare:js
+ *   E2E_ROWS=10000000 pnpm --filter @columna/bench run compare:js
+ *   E2E_LIBS=columna,polars,duckdb E2E_ROWS=10000000 pnpm --filter @columna/bench run compare:js
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync, readFileSync } from 'node:fs'
@@ -20,8 +21,13 @@ const ROWS = Number(process.env.E2E_ROWS ?? 2_000_000)
 const OUT = new URL('../results/', import.meta.url)
 const INPUT = fileURLToPath(new URL(`e2e-input-${ROWS}.csv`, OUT)).replace(/\\/g, '/')
 const OUTPUT = (lib: string) => fileURLToPath(new URL(`compare-${lib}-${ROWS}.csv`, OUT)).replace(/\\/g, '/')
-const LIBS = ['columna', 'arquero', 'duckdb-wasm', 'polars', 'polars-lazy', 'duckdb'] as const
-type Lib = (typeof LIBS)[number]
+const ALL_LIBS = ['columna', 'arquero', 'duckdb-wasm', 'polars', 'polars-lazy', 'duckdb'] as const
+type Lib = (typeof ALL_LIBS)[number]
+const LIBS: Lib[] = (process.env.E2E_LIBS ?? ALL_LIBS.join(','))
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s): s is Lib => (ALL_LIBS as readonly string[]).includes(s))
+if (LIBS.length === 0) throw new Error(`E2E_LIBS must include at least one of: ${ALL_LIBS.join(', ')}`)
 
 /** Timed operations — order used in the markdown report. */
 const OPS = [
@@ -154,7 +160,8 @@ async function runLib(lib: Lib): Promise<Run> {
   let note: string | undefined
 
   if (lib === 'columna') {
-    const { DataFrame, col } = await import('columna')
+    const { DataFrame, col, init } = await import('columna')
+    await init({ native: true, rust: false })
     const df = await timed('read', () => DataFrame.readCsv({ path: INPUT }))
     const filtered = await timed('filter', () =>
       df.filter(col('age').gt(30).and(col('salary').gt(45_000))).collect(),
@@ -927,7 +934,7 @@ async function main(): Promise<void> {
   lines.push('## How to read this')
   lines.push('')
   lines.push(
-    '- Wall-clock of a single process on one machine; the multi-threaded engines (Polars, native DuckDB) use every core, columna / Arquero / DuckDB-Wasm one.',
+    '- Wall-clock of a single process on one machine; Polars / native DuckDB use every core end-to-end. columna engages its worker pool / native Rayon kernels on heavy ops above per-op thresholds (see README → Engines); Arquero and DuckDB-Wasm stay single-threaded.',
   )
   lines.push(
     '- polars-lazy pays the CSV scan inside every operation (that is the point of a streaming optimiser); compare its per-op numbers with `read + op` of the eager rows.',
@@ -939,7 +946,7 @@ async function main(): Promise<void> {
     '- SQL engines (DuckDB / DuckDB-Wasm) time **aggregate-over-join** (`count`/`sum` on a join), not full join materialization — do not compare that join cell directly to columna/Arquero/Polars full join output.',
   )
   lines.push(
-    '- **unique** keeps the first row per (`age`,`city`) key (~300 groups from 2M rows) — a hash-dedup stress with a tiny result.',
+    `- **unique** keeps the first row per (\`age\`,\`city\`) key (~${ROWS === 2_000_000 ? '300' : 'scaled'} groups from ${ROWS.toLocaleString('en-US')} rows) — a hash-dedup stress with a tiny result.`,
   )
   lines.push(
     '- **head** / **tail** are first/last 1 000 rows in storage order (head id Σ = 499500 on this fixture).',
@@ -950,7 +957,9 @@ async function main(): Promise<void> {
   lines.push('- **summary-match** checks aggregates (row counts, sums, sort extremes) with tolerance — not byte-identical tables.')
   lines.push('- columna numbers come from `collect()` on the CPU engine; `collectWithReport()` confirms no other backend was involved.')
   lines.push('')
-  const outMd = new URL('../../../docs/comparison-js.md', import.meta.url)
+  // Keep the canonical 2M report at comparison-js.md; larger runs get a sized filename.
+  const mdName = ROWS === 2_000_000 ? 'comparison-js.md' : `comparison-js-${Math.round(ROWS / 1_000_000)}m.md`
+  const outMd = new URL(`../../../docs/${mdName}`, import.meta.url)
   writeFileSync(outMd, lines.join('\n'))
   writeFileSync(new URL(`compare-js-${ROWS}.json`, OUT), JSON.stringify(results, null, 2))
   console.log(`wrote ${fileURLToPath(outMd)}`)

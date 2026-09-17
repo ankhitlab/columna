@@ -296,6 +296,72 @@ describe('analytics', () => {
     ])
   })
 
+  it('fused filter then unique matches materialize then unique', async () => {
+    const df = DataFrame.fromRows([
+      { k: 'a', v: 1 },
+      { k: 'a', v: 2 },
+      { k: 'b', v: 3 },
+      { k: 'a', v: 4 },
+      { k: 'c', v: 5 },
+      { k: 'b', v: 6 },
+    ])
+    const predicate = col('v').gt(2)
+
+    const fused = await df.filter(predicate).unique(['k']).collect()
+    const stepwise = await (await df.filter(predicate).collect()).unique(['k']).collect()
+
+    expect(fused.toArray()).toEqual(stepwise.toArray())
+    expect(fused.toArray()).toEqual([
+      { k: 'b', v: 3 },
+      { k: 'a', v: 4 },
+      { k: 'c', v: 5 },
+    ])
+  })
+
+  it('fused filter then sort then limit matches stepwise', async () => {
+    const df = DataFrame.fromRows([
+      { id: 1, score: 10 },
+      { id: 2, score: 50 },
+      { id: 3, score: 30 },
+      { id: 4, score: 80 },
+      { id: 5, score: 20 },
+      { id: 6, score: 70 },
+    ])
+    const predicate = col('score').gt(25)
+
+    const fused = await df.filter(predicate).sort(col('score').desc()).limit(2).collect()
+    const stepwise = await (await df.filter(predicate).collect()).sort(col('score').desc()).limit(2).collect()
+
+    expect(fused.toArray()).toEqual(stepwise.toArray())
+    expect(fused.toArray()).toEqual([
+      { id: 4, score: 80 },
+      { id: 6, score: 70 },
+    ])
+  })
+
+  it('project through join keeps only selected columns and matches stepwise', async () => {
+    const left = DataFrame.fromRows([
+      { id: 1, a: 10, x: 100 },
+      { id: 2, a: 20, x: 200 },
+      { id: 3, a: 30, x: 300 },
+    ])
+    const right = DataFrame.fromRows([
+      { id: 1, b: 11, y: 111 },
+      { id: 2, b: 22, y: 222 },
+      { id: 4, b: 44, y: 444 },
+    ])
+
+    const fused = await left.join(right, { on: 'id' }).select('id', 'a', 'b').collect()
+    const stepwise = await (await left.join(right, { on: 'id' }).collect()).select('id', 'a', 'b').collect()
+
+    expect(fused.toArray()).toEqual(stepwise.toArray())
+    expect(fused.columns).toEqual(['id', 'a', 'b'])
+    expect(fused.toArray()).toEqual([
+      { id: 1, a: 10, b: 11 },
+      { id: 2, a: 20, b: 22 },
+    ])
+  })
+
   it('window and rolling', async () => {
     const df = DataFrame.fromRows([
       { g: 'a', v: 1 },

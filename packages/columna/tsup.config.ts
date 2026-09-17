@@ -7,6 +7,7 @@ const workspace = [/^@columna\//]
 const external = [
   'hyparquet',
   'hyparquet-compressors',
+  'hyparquet-writer',
   'xlsx',
   'pg',
   'mssql',
@@ -25,6 +26,10 @@ export default defineConfig({
     advanced: 'src/advanced.ts',
     // Sibling modules required by runtime dynamic imports after bundling.
     'parallel-node': '../runtime/src/parallel-node.ts',
+    'parallel-web': '../runtime/src/parallel-web.ts',
+    'engine-worker': '../runtime/src/engine-worker.ts',
+    'engine-worker-web': '../runtime/src/engine-worker-web.ts',
+    'engine-jobs': '../runtime/src/engine-jobs.ts',
     'filter-worker': '../runtime/src/filter-worker.ts',
     'csv-worker': '../core/src/io/csv-worker.ts',
     'csv-parallel': '../core/src/io/csv-parallel.ts',

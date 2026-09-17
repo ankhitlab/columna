@@ -1,4 +1,5 @@
 import type { ExprNode, PlanNode } from './types.js'
+import { collectLeafTables } from './types.js'
 
 /** Collect column names referenced by an expression (best-effort). */
 export function exprColumnRefs(expr: ExprNode, out = new Set<string>()): Set<string> {
@@ -61,8 +62,22 @@ function projectIsColumnSubset(columns: Array<string | ExprNode>): string[] | nu
   return names
 }
 
+/** Simple column-subset / alias-of-col project → output names (or null if complex). */
+export function projectColumnSubset(columns: Array<string | ExprNode>): string[] | null {
+  return projectIsColumnSubset(columns)
+}
+
 function mapInput(plan: PlanNode, input: PlanNode): PlanNode {
   return { ...(plan as object), input } as PlanNode
+}
+
+/** Best-effort column names available from leaf scans (misses withColumn/rename). */
+export function leafColumnNames(plan: PlanNode): Set<string> {
+  const names = new Set<string>()
+  for (const t of collectLeafTables(plan)) {
+    for (const f of t.schema) names.add(f.name)
+  }
+  return names
 }
 
 /**
@@ -99,19 +114,63 @@ export function pushdownProjections(plan: PlanNode): PlanNode {
       }
 
       if (input.type === 'join' && input.how !== 'cross') {
-        const leftNeed = [...new Set([...input.leftOn, ...names])]
-        const rightNeed = [...new Set([...input.rightOn, ...names])]
-        return {
-          type: 'project',
-          input: {
-            type: 'join',
-            left: pushdownProjections({ type: 'project', input: input.left, columns: leftNeed }),
-            right: pushdownProjections({ type: 'project', input: input.right, columns: rightNeed }),
-            leftOn: input.leftOn,
-            rightOn: input.rightOn,
-            how: input.how,
-          },
-          columns: plan.columns,
+        const leftCols = leafColumnNames(input.left)
+        const rightCols = leafColumnNames(input.right)
+        const lSuffix = input.lSuffix ?? ''
+        const rSuffix = input.rSuffix ?? '_right'
+        const leftNeed = new Set(input.leftOn)
+        const rightNeed = new Set(input.rightOn)
+        let classified = true
+        for (const name of names) {
+          let placed = false
+          if (leftCols.has(name)) {
+            leftNeed.add(name)
+            placed = true
+          }
+          if (lSuffix && name.endsWith(lSuffix)) {
+            const base = name.slice(0, -lSuffix.length)
+            if (base && leftCols.has(base) && rightCols.has(base)) {
+              leftNeed.add(base)
+              placed = true
+            }
+          }
+          if (rSuffix && name.endsWith(rSuffix)) {
+            const base = name.slice(0, -rSuffix.length)
+            if (base && rightCols.has(base)) {
+              rightNeed.add(base)
+              placed = true
+            }
+          }
+          if (!leftCols.has(name) && rightCols.has(name)) {
+            rightNeed.add(name)
+            placed = true
+          }
+          if (input.leftOn.includes(name) || input.rightOn.includes(name)) {
+            if (input.leftOn.includes(name)) leftNeed.add(name)
+            if (input.rightOn.includes(name)) rightNeed.add(name)
+            placed = true
+          }
+          if (!placed) {
+            classified = false
+            break
+          }
+        }
+        if (classified) {
+          return {
+            type: 'project',
+            input: {
+              type: 'join',
+              left: pushdownProjections({ type: 'project', input: input.left, columns: [...leftNeed] }),
+              right: pushdownProjections({ type: 'project', input: input.right, columns: [...rightNeed] }),
+              leftOn: input.leftOn,
+              rightOn: input.rightOn,
+              how: input.how,
+              lSuffix: input.lSuffix,
+              rSuffix: input.rSuffix,
+              validate: input.validate,
+            },
+            columns: plan.columns,
+          }
         }
       }
 

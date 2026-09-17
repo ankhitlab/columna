@@ -42,8 +42,9 @@ describe('filter kernels', () => {
     }
     const sync = dualGtIndices(a, b, n / 2, n / 4)
     const parallel = await parallelDualGtIndices(a, b, n / 2, n / 4)
-    expect(parallel.length).toBe(sync.length)
-    expect([...parallel]).toEqual([...sync])
+    expect(parallel.kernel).toBe('js:dualFilter')
+    expect(parallel.indices.length).toBe(sync.length)
+    expect([...parallel.indices]).toEqual([...sync])
   })
 
   it('parallelDualGtIndices with lowered minRows matches sync', async () => {
@@ -56,7 +57,7 @@ describe('filter kernels', () => {
     }
     const sync = dualGtIndices(a, b, 1000, 1000)
     const parallel = await parallelDualGtIndices(a, b, 1000, 1000, { minRows: 1_000 })
-    expect([...parallel]).toEqual([...sync])
+    expect([...parallel.indices]).toEqual([...sync])
   })
 })
 

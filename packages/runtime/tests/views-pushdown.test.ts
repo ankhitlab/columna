@@ -68,4 +68,41 @@ describe('projection pushdown', () => {
       expect(out.input.type).toBe('project')
     }
   })
+
+  it('prunes join sides to projection + keys', () => {
+    const left: PlanNode = {
+      type: 'scan',
+      table: DataFrame.fromRows([{ id: 1, a: 10, x: 100 }]).table,
+    }
+    const right: PlanNode = {
+      type: 'scan',
+      table: DataFrame.fromRows([{ id: 1, b: 11, y: 111 }]).table,
+    }
+    const plan: PlanNode = {
+      type: 'project',
+      columns: ['id', 'a', 'b'],
+      input: {
+        type: 'join',
+        left,
+        right,
+        leftOn: ['id'],
+        rightOn: ['id'],
+        how: 'inner',
+      },
+    }
+    const out = pushdownProjections(plan)
+    expect(out.type).toBe('project')
+    if (out.type === 'project' && out.input.type === 'join') {
+      expect(out.input.left.type).toBe('project')
+      expect(out.input.right.type).toBe('project')
+      if (out.input.left.type === 'project') {
+        expect(out.input.left.columns).toEqual(expect.arrayContaining(['id', 'a']))
+        expect(out.input.left.columns).not.toContain('x')
+      }
+      if (out.input.right.type === 'project') {
+        expect(out.input.right.columns).toEqual(expect.arrayContaining(['id', 'b']))
+        expect(out.input.right.columns).not.toContain('y')
+      }
+    }
+  })
 })

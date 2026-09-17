@@ -17,7 +17,7 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsup src/index.ts src/filter-worker.ts src/parallel-node.ts --format esm,cjs --dts --clean --external @columna/native",
+    "build": "tsup src/index.ts src/engine-worker.ts src/engine-worker-web.ts src/engine-jobs.ts src/filter-worker.ts src/parallel-node.ts src/parallel-web.ts --format esm,cjs --dts --clean --external @columna/native",
     "clean": "rimraf dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

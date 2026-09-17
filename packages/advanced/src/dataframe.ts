@@ -26,7 +26,7 @@ import { normalityTest as normalityTestFn, type NormalityMethod, type NormalityR
 import { tukeyHSD, type TukeyResult } from './tukey.js'
 import { dunnett as dunnettTest, fisherLSD, gamesHowell as gamesHowellFn, hsuMCB, type DunnettResult, type FisherResult, type HsuResult } from './multcomp.js'
 import { kruskal as kruskalTest, mannWhitney as mannWhitneyTest, type KruskalResult, type MannWhitneyResult } from './nonparametric.js'
-import { corrTest as corrTestFn, dixon as dixonFn, grubbs as grubbsFn, partialCorr as partialCorrFn, varTest1 as varTest1Fn, ztest1 as ztest1Fn, type CorrTestResult, type OutlierResult, type PartialCorrResult, type VarTest1Result, type ZTestResult } from './basic.js'
+import { corrTest as corrTestFn, dixon as dixonFn, grubbs as grubbsFn, partialCorr as partialCorrFn, propTest1, propTest2, varTest1 as varTest1Fn, ztest1 as ztest1Fn, type CorrTestResult, type OutlierResult, type PartialCorrResult, type PropTestResult, type VarTest1Result, type ZTestResult } from './basic.js'
 import { friedman as friedmanFn, moodMedian as moodFn, runsTest as runsFn, signTest as signFn, wilcoxonSigned as wilcoxonFn, type FriedmanResult, type MoodResult, type RunsTestResult, type SignTestResult, type WilcoxonResult } from './nonparametric2.js'
 import { tost1, tost2, tostPaired, type TostResult } from './equivalence.js'
 import { fittedLine as fittedLineFn, ols, type OlsOptions, type OlsResult } from './regression.js'
@@ -56,10 +56,26 @@ import { manovaModel as manovaModelFn } from './manova.js'
 import { autoModel as autoModelFn, crossValidate as cvFn, type ModelKind } from './automl.js'
 import { pca as pcaFn, kmeans as kmeansFn, type PcaResult, type KMeansResult } from './multivariate.js'
 import { cart as cartFn, randomForest as rfFn, type CartResult, type RandomForestResult, type CartOptions } from './predictive.js'
+import { ancova as ancovaFn, type AncovaResult } from './anova2.js'
+import { adfTest as adfTestFn, kpssTest as kpssTestFn, type UnitRootResult } from './unitroot.js'
+import { ksTwoSample as ksTwoSampleFn, type KsTwoSampleResult } from './gof2.js'
+import { ridge as ridgeFn, lasso as lassoFn, type PenalizedResult } from './penalized.js'
 
 void bonettTest
 
 export type MannWhitneyOptions = { alternative?: Alternative; confidence?: number; method?: 'auto' | 'exact' | 'asymptotic' }
+
+export type DataFramePropTestOptions = {
+  /** Denominator column (summed with `eventsCol` for one sample, or per group for two samples). Required without `by`. */
+  trials?: string
+  /** Exactly two levels → two-sample test on aggregated events / trials per level. */
+  by?: string
+  p0?: number
+  alternative?: Alternative
+  confidence?: number
+  method?: 'exact' | 'normal' | 'fisher'
+  pooled?: boolean
+}
 
 /** Column-based t-test: one-sample by default, two-sample with `by` (a 2-level column), paired with `paired`. */
 export type DataFrameTTestOptions = TTestOptions & {
@@ -86,6 +102,46 @@ function groupsOf(df: DataFrame, column: string, by: string): Record<string, Num
     arr.push(x[i]!)
   }
   return Object.fromEntries([...groups.entries()].sort(([p], [q]) => (p < q ? -1 : p > q ? 1 : 0)))
+}
+
+/** Sum numeric `valueCol` and optional `trialsCol` per level of `by` (sorted). Without `trialsCol`, each row counts as one trial and `valueCol` is summed as events. */
+function propAggByGroup(
+  df: DataFrame,
+  eventsCol: string,
+  by: string,
+  trialsCol?: string,
+): Record<string, { events: number; trials: number }> {
+  const e = df.getColumn(eventsCol).toArray()
+  const g = df.getColumn(by).toArray()
+  const t = trialsCol ? df.getColumn(trialsCol).toArray() : null
+  const map = new Map<string, { events: number; trials: number }>()
+  for (let i = 0; i < e.length; i++) {
+    if (g[i] === null) continue
+    const k = String(g[i])
+    let slot = map.get(k)
+    if (!slot) map.set(k, (slot = { events: 0, trials: 0 }))
+    if (t) {
+      const ev = e[i]
+      const tr = t[i]
+      if (typeof ev !== 'number' || typeof tr !== 'number' || !Number.isFinite(ev) || !Number.isFinite(tr)) continue
+      slot.events += ev
+      slot.trials += tr
+    } else {
+      const ev = e[i]
+      if (typeof ev !== 'number' || !Number.isFinite(ev)) continue
+      slot.events += ev
+      slot.trials += 1
+    }
+  }
+  return Object.fromEntries([...map.entries()].sort(([p], [q]) => (p < q ? -1 : p > q ? 1 : 0)))
+}
+
+function sumNumericCol(df: DataFrame, column: string): number {
+  let s = 0
+  for (const v of df.getColumn(column).toArray()) {
+    if (typeof v === 'number' && Number.isFinite(v)) s += v
+  }
+  return s
 }
 
 declare module '@columna/core' {
@@ -283,6 +339,23 @@ declare module '@columna/core' {
     crossValidate(y: string, predictors: string[], options: { model: ModelKind; task?: 'regression' | 'classification'; folds?: number; seed?: number; nTrees?: number }): import('./automl.js').CvResult
     /** Automated model selection over the tree learners (+ OLS / logistic). */
     autoModel(y: string, predictors: string[], options?: { task?: 'regression' | 'classification'; folds?: number; seed?: number; models?: ModelKind[]; nTrees?: number }): import('./automl.js').AutoModelResult
+    /**
+     * 1 or 2 Proportions: without `by`, sums `eventsCol` and `trials` for propTest1; with `by` (2 levels),
+     * aggregates per group (binary column or events + trials columns) for propTest2.
+     */
+    propTest(eventsCol: string, options?: DataFramePropTestOptions): PropTestResult
+    /** Augmented Dickey–Fuller unit-root test on a series column. */
+    adfTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' | 'n' }): UnitRootResult
+    /** KPSS stationarity test on a series column. */
+    kpssTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' }): UnitRootResult
+    /** Ridge regression of `y` on predictor columns. */
+    ridge(y: string, predictors: string[], options?: { alpha?: number }): PenalizedResult
+    /** Lasso regression of `y` on predictor columns. */
+    lasso(y: string, predictors: string[], options?: { alpha?: number; maxIter?: number; tol?: number }): PenalizedResult
+    /** One-way ANCOVA: `y` by `group` adjusting for `covariate`. */
+    ancova(y: string, group: string, covariate: string): AncovaResult
+    /** Two-sample Kolmogorov–Smirnov between the two levels of `by`. */
+    ksTwoSample(column: string, by: string): KsTwoSampleResult
   }
   interface LazyFrame {
     ttest(column: string, options?: DataFrameTTestOptions): Promise<TTestResult>
@@ -378,6 +451,13 @@ declare module '@columna/core' {
     manovaModel(responses: string[], rhs: string, options?: { factors?: string[] }): Promise<import('./manova.js').ManovaModelResult>
     crossValidate(y: string, predictors: string[], options: { model: ModelKind; task?: 'regression' | 'classification'; folds?: number; seed?: number; nTrees?: number }): Promise<import('./automl.js').CvResult>
     autoModel(y: string, predictors: string[], options?: { task?: 'regression' | 'classification'; folds?: number; seed?: number; models?: ModelKind[]; nTrees?: number }): Promise<import('./automl.js').AutoModelResult>
+    propTest(eventsCol: string, options?: DataFramePropTestOptions): Promise<PropTestResult>
+    adfTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' | 'n' }): Promise<UnitRootResult>
+    kpssTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' }): Promise<UnitRootResult>
+    ridge(y: string, predictors: string[], options?: { alpha?: number }): Promise<PenalizedResult>
+    lasso(y: string, predictors: string[], options?: { alpha?: number; maxIter?: number; tol?: number }): Promise<PenalizedResult>
+    ancova(y: string, group: string, covariate: string): Promise<AncovaResult>
+    ksTwoSample(column: string, by: string): Promise<KsTwoSampleResult>
   }
 }
 
@@ -843,6 +923,42 @@ D.crossValidate = function (this: DataFrame, y, predictors, options) {
 D.autoModel = function (this: DataFrame, y, predictors, options = {}) {
   return autoModelFn(rowsOf(this, predictors), this.getColumn(y).toArray() as Array<number | string>, options)
 }
+D.propTest = function (this: DataFrame, eventsCol, options = {}) {
+  const { trials: trialsCol, by, ...rest } = options
+  if (by) {
+    const agg = propAggByGroup(this, eventsCol, by, trialsCol)
+    const levels = Object.keys(agg)
+    if (levels.length !== 2) throw new RangeError(`propTest: column "${by}" must have exactly 2 levels, got ${levels.length}`)
+    const a = agg[levels[0]!]!
+    const b = agg[levels[1]!]!
+    return propTest2(a.events, a.trials, b.events, b.trials, rest)
+  }
+  if (!trialsCol) throw new RangeError('propTest: trials column is required for a one-sample test (omit by)')
+  const events = sumNumericCol(this, eventsCol)
+  const trials = sumNumericCol(this, trialsCol)
+  return propTest1(events, trials, rest)
+}
+D.adfTest = function (this: DataFrame, column, options = {}) {
+  return adfTestFn(this.getColumn(column).toArray() as Num, options)
+}
+D.kpssTest = function (this: DataFrame, column, options = {}) {
+  return kpssTestFn(this.getColumn(column).toArray() as Num, options)
+}
+D.ridge = function (this: DataFrame, y, predictors, options = {}) {
+  return ridgeFn(this.getColumn(y).toArray() as Num, rowsOf(this, predictors), options)
+}
+D.lasso = function (this: DataFrame, y, predictors, options = {}) {
+  return lassoFn(this.getColumn(y).toArray() as Num, rowsOf(this, predictors), options)
+}
+D.ancova = function (this: DataFrame, y, group, covariate) {
+  return ancovaFn(this.getColumn(y).toArray() as Num, this.getColumn(group).toArray(), this.getColumn(covariate).toArray() as Num)
+}
+D.ksTwoSample = function (this: DataFrame, column, by) {
+  const g = groupsOf(this, column, by)
+  const levels = Object.keys(g)
+  if (levels.length !== 2) throw new RangeError(`ksTwoSample: column "${by}" must have exactly 2 levels, got ${levels.length}`)
+  return ksTwoSampleFn(g[levels[0]!]!, g[levels[1]!]!)
+}
 
 // LazyFrame: materialize, then delegate
 const L = LazyFrame.prototype
@@ -859,6 +975,7 @@ for (const name of [
   'trendAnalysis', 'decompose', 'stl', 'ets', 'acf', 'arima', 'autoArima', 'reliabilityFit', 'kaplanMeier', 'logRank', 'coxPH', 'fineGray', 'mixedModel', 'glmm', 'nestedAnova', 'capabilitySixpack', 'manova', 'pca', 'kmeans', 'cart', 'randomForest',
   'descriptiveStats', 'graphicalSummary', 'poissonGof', 'boxplotStats', 'intervalPlot', 'mainEffectsPlot', 'interactionPlot', 'stabilityStudy', 'gChart', 'tChart', 't2Chart', 'mewma', 'periodogram',
   'lifeRegression', 'altRegression', 'powerLawNHPP', 'probitAnalysis', 'clusterVariables', 'multipleCorrespondence', 'itemAnalysis', 'manovaModel', 'crossValidate', 'autoModel',
+  'propTest', 'adfTest', 'kpssTest', 'ridge', 'lasso', 'ancova', 'ksTwoSample',
 ] as const) {
   ;(L as unknown as Record<string, unknown>)[name] = lazy(name)
 }

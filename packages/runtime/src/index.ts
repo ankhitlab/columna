@@ -10,6 +10,7 @@ import {
 } from './memory.js'
 import { ensureSpillSupport } from './spill.js'
 import { lookupPersistCache, maybeStorePersist, type PersistLookup } from './persist.js'
+import { optimizePlan, joinOrderChanged } from './optimize.js'
 import {
   DEFAULT_WASM_MIN_ROWS,
   DEFAULT_WEBGPU_MIN_ROWS,
@@ -69,8 +70,9 @@ export class Runtime {
   }
 
   explain(plan: PlanNode): string {
-    const chosen = this.chooseBackend(plan)
-    return `Engine: ${chosen.name} (planned — the backend a node actually ran on is only known after execution; see collectWithReport())\n${explainPlan(plan)}`
+    const optimized = optimizePlan(plan)
+    const chosen = this.chooseBackend(optimized)
+    return `Engine: ${chosen.name} (planned — the backend a node actually ran on is only known after execution; see collectWithReport())\n${explainPlan(optimized)}`
   }
 
   chooseBackend(plan: PlanNode): Backend {
@@ -116,6 +118,8 @@ export class Runtime {
     if (memory?.maxBytes || getMemoryPolicy().maxBytes) await ensureSpillSupport()
     return withMemoryPolicyAsync(memory, async () => {
       resetExecMemoryStats()
+      const rawPlan = plan
+      plan = optimizePlan(plan)
       const cached = lookupPersistCache(plan)
       if (cached) {
         const mem = getExecMemoryStats()
@@ -135,17 +139,28 @@ export class Runtime {
           },
         }
       }
-      return this.executeWithReportInner(plan)
+      return this.executeWithReportInner(plan, rawPlan)
     })
   }
 
-  private async executeWithReportInner(plan: PlanNode): Promise<{ table: TableView; report: ExecutionReport }> {
+  private async executeWithReportInner(
+    plan: PlanNode,
+    rawPlan?: PlanNode,
+  ): Promise<{ table: TableView; report: ExecutionReport }> {
     const requested = this.options.engine
     const strict = this.options.strict
     const backend = this.chooseBackend(plan)
     const events: ExecutionEvent[] = []
     const fallbacks: ExecutionReport['fallbacks'] = []
     const ctx: ExecContext = { requested, strict, trace: (e) => void events.push(e) }
+    if (rawPlan && joinOrderChanged(rawPlan, plan)) {
+      events.push({
+        node: 'join',
+        backend: 'cpu',
+        kernel: 'optimized:joinReorder',
+        reason: 'inner join build/order changed by optimizePlan',
+      })
+    }
     const t0 = now()
     const finish = (table: TableView, dispatched: EngineKind): { table: TableView; report: ExecutionReport } => {
       const backendsUsed = [...new Set(events.map((e) => e.backend))]
@@ -233,4 +248,26 @@ export {
   markPlanPersist,
   unmarkPlanPersist,
 } from './persist.js'
-export { tryLoadNativeKernels, isNativeKernelsLoaded, setNativeKernels, NATIVE_FILTER_MIN_ROWS } from './native_kernels.js'
+export { tryLoadNativeKernels, isNativeKernelsLoaded, setNativeKernels, NATIVE_FILTER_MIN_ROWS, NATIVE_SORT_MIN_ROWS, NATIVE_SORT_MULTI_MIN_ROWS, NATIVE_FILTER_GENERIC_MIN_ROWS, NATIVE_UNIQUE_MIN_ROWS, NATIVE_JOIN_BUILD_MIN_ROWS } from './native_kernels.js'
+export { optimizePlan, estimatePlanRows, planOutputColumns, joinOrderChanged } from './optimize.js'
+export { pushdownProjections, exprColumnRefs } from './pushdown.js'
+export {
+  approxNdv,
+  estimateFilterSelectivity,
+  sampleIndices,
+} from './stats.js'
+export {
+  PARALLEL_MIN_ROWS,
+  PARALLEL_GATHER_MIN_ROWS,
+  PARALLEL_FILTER_MIN_ROWS,
+  PARALLEL_SORT_MIN_ROWS,
+  PARALLEL_GROUPBY_MIN_ROWS,
+  PARALLEL_UNIQUE_MIN_ROWS,
+  parallelDualGtIndices,
+  parallelTakeTable,
+  parallelFilter,
+  parallelSort,
+  parallelGroupBy,
+  parallelUnique,
+  closeParallelPool,
+} from './parallel.js'

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/columna-logo.png" alt="columna" width="360" />
+</p>
+
 # columna
 
 Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary and no runtime dependencies in the core.
@@ -278,6 +282,16 @@ df.groupBy('city').agg((c) => ({ n: c.age.count(), pay: c.salary.mean() }))
 df.join(regions, { on: 'city' })                     // LazyFrame<L & R>; leftJoin makes R's columns | null
 ```
 
+### Analyst tips
+
+- Prefer typed predicates: `df.filter((c) => c.age.gt(18))` or `df.where(...)` (no string `query()` DSL). Helpers: `notNull('age')`, `between('age', 18, 65)`.
+- On a materialized `DataFrame`, `head` / `tail` / `show` / `describe` / `nunique` are **sync** — no `await collect()` for a notebook peek. Transforms (`filter`, `groupBy`, `join`, …) stay lazy; call `collect()` when you need the result. Lazy `describe` remains on `df.lazy().describe()`.
+- Forward/back fill: `await df.ffill().collect()` / `bfill()`; fill by column with `fillNull({ age: 0, city: 'NA' })`; Series: `df.col('age').fillNull(0)`.
+- Quick aggregates: `df.groupBy('city').mean()` / `.sum()` / `.count()` / `.std()`; multi-agg `agg({ salary: ['sum', 'mean'] })`.
+- Sort nulls: default nulls last; `df.sort(col('x').asc({ nullsLast: false }))` for nulls first.
+- Column sugar: `exclude('notes')`, `selectNumeric()`, `assign({ z: col('x').mul(2) })`, `rename((n) => n.toLowerCase())`.
+- Joins: colliding columns get `_right` by default (`suffix` / `lSuffix` / `rSuffix`); `rightJoin` / `outerJoin` / `fullJoin`; optional `validate: '1:1'`.
+
 What is and is not checked:
 
 - `col('x')` is untyped on purpose (`Expr<any>`): a string names a column the compiler knows nothing about. It
@@ -285,8 +299,8 @@ What is and is not checked:
   `cols<S>()` gives typed refs outside callbacks.
 - Readers (`readCsv` / `readJson` / …) return `DataFrame<Row>`. `readCsv<S>(…)` is an **assertion** by the caller —
   the file is not validated against `S`.
-- Joins do not model suffixes for colliding non-key columns; `melt`, `pivot`, `transpose`, `describe`, `valueCounts`,
-  `corr` return `LazyFrame<Row>` (their columns depend on data).
+- Joins do not model suffixes for colliding non-key columns; `melt`, `pivot`, `transpose`, `valueCounts`,
+  `corr` return `LazyFrame<Row>` (their columns depend on data). Sync `DataFrame.describe()` returns `DataFrame<Row>`.
 - Untyped code keeps compiling: every generic defaults to `Row` = `Record<string, unknown>`.
 
 The type-level guarantees are themselves tested (`packages/core/tests/schema-types.test.ts` runs under `tsc` with
@@ -370,16 +384,17 @@ await left.semiJoin(right, 'id').crossJoin(dims).collect()
 
 df.toCsv()
 df.toCsv({ escapeFormulas: true })  // neutralise =, +, -, @ cells for Excel-bound exports of untrusted text
-await df.writeParquetLike('./out.columna.json')  // custom JSON format; Apache Parquet writer not yet available
+await df.writeParquet('./out.parquet')  // Apache Parquet via hyparquet-writer (round-trips with readParquet)
+await df.writeParquetLike('./out.columna.json')  // custom JSON container (not Apache Parquet)
 df.toMarkdown()
 df.profile()
 ```
 
-> **Note:** `writeParquet()` previously wrote a JSON payload while `readParquet()` reads real Apache Parquet via hyparquet — that mismatch is now an explicit error. Use `writeParquetLike()` for the JSON format.
+> **Note:** `writeParquet()` writes real Apache Parquet. `writeParquetLike()` is the older JSON `columna-parquet-like-v1` format for in-process round-trips without hyparquet.
 
 ## Advanced statistics (`columna/advanced`)
 
-Everything statistical beyond the DataFrame engine lives in **`@columna/advanced`** and is imported separately, so the standard bundle stays a DataFrame library. Importing it also installs the column-level methods on `DataFrame` / `LazyFrame` (`df.ttest(…)`, `await lazy.anova(…)`). Roadmap and test protocol: [docs/advanced-roadmap.md](docs/advanced-roadmap.md). Minitab menu coverage matrix: [docs/minitab-coverage.md](docs/minitab-coverage.md).
+Everything statistical beyond the DataFrame engine lives in **`@columna/advanced`** and is imported separately, so the standard bundle stays a DataFrame library. Importing **`columna/advanced`** (or `@columna/advanced`) installs column-level methods on `DataFrame` / `LazyFrame` (`df.ttest(…)`, `await lazy.anova(…)`). For notebooks and reports, pass result objects to **`formatReport(result, 'markdown' | 'html')`** for readable tables. Roadmap and test protocol: [docs/advanced-roadmap.md](docs/advanced-roadmap.md). Minitab menu coverage matrix: [docs/minitab-coverage.md](docs/minitab-coverage.md).
 
 ```ts
 import { DataFrame, col } from 'columna'
@@ -553,7 +568,7 @@ planner, and by default an engine that cannot run a node hands it to the CPU wit
 
 | Engine | Executes on its own | Everything else |
 |---|---|---|
-| `cpu` | all nodes: typed JS kernels; optional native Rust addon (filter ≥ 1M rows, gather ≥ 250k, join / groupBy ≥ 500k, strings ≥ 10M) and worker-thread parallelism (dual filter ≥ 50M rows, gather ≥ 2M) — Node only, browsers stay single-threaded | — |
+| `cpu` | all nodes: typed JS kernels; optional native Rust addon (filter ≥ 1M rows, gather ≥ 50k, sort ≥ 500k, multi-key sort / unique / hash-join build / generic filter ≥ 1M, join / groupBy ≥ 500k, strings ≥ 10M) and a reusable worker pool — Node `worker_threads` **and** browser Web Workers — for filter / dual-gt (≥ 1M when native is absent), sort (≥ 5M), groupBy (≥ 5M), unique (≥ 5M), gather (≥ 2M) over SharedArrayBuffer chunks; native Rayon is preferred over workers when both are available; falls back to single-threaded kernels below each threshold or when workers / SharedArrayBuffer are unavailable | — |
 | `wasm` | one kernel family: `col OP n AND col OP n` filters on i32×f64 / i32×i32 / f64×f64 columns, **≥ 5M rows**, and only when the Rust `pkg` is built and loaded | CPU |
 | `webgpu` | AND-filters over i32 / u32 / f32 columns and `col ARITH n` maps on f32 columns (exact; f64 / datetime need `gpuLossyF32`); rows ≥ 10 000 | CPU — including mask → indices and the row gather *after* every GPU filter |
 
@@ -570,7 +585,7 @@ console.log(formatExecutionReport(report))
 await df.lazy().filter(...).engine('webgpu', { strict: true }).collect()
 ```
 
-`.explain()` prints the plan and the backend it is *dispatched* to; only `collectWithReport()` knows what executed.
+`.explain()` prints the **optimized** plan (same `optimizePlan` pass as `collect` / `executeCpu`) with per-node `rows≈` estimates and the backend it is *dispatched* to; only `collectWithReport()` knows what executed. Rewrites include filter merge/pushdown, sample/NDV cardinality estimates, and **inner-join reorder** (greedy equi graph; hash build on the smaller side; left/semi/anti never swap) — not a full DuckDB-style cost model.
 A benchmark that does not read the report may be timing JavaScript under a WASM label.
 
 ### Memory and scale

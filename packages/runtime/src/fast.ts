@@ -5,6 +5,7 @@
 import {
   allocateData,
   getColumn,
+  getValue,
   isNumeric,
   isValid,
   setValid,
@@ -25,6 +26,10 @@ import {
   NATIVE_GATHER_MIN_ROWS,
   NATIVE_GROUPBY_MIN_ROWS,
   NATIVE_JOIN_MIN_ROWS,
+  NATIVE_JOIN_BUILD_MIN_ROWS,
+  NATIVE_SORT_MIN_ROWS,
+  NATIVE_SORT_MULTI_MIN_ROWS,
+  NATIVE_UNIQUE_MIN_ROWS,
   NATIVE_STR_MIN_ROWS,
 } from './native_kernels.js'
 
@@ -138,31 +143,80 @@ function resolveCmps(table: TableView, predicate: ExprNode): Cmp[] | null {
   return resolved
 }
 
+const CMP_OP_CODE: Record<string, number> = {
+  eq: 0,
+  neq: 1,
+  gt: 2,
+  gte: 3,
+  lt: 4,
+  lte: 5,
+}
+
 /**
- * Dual-gt indices (shared by sync filter + parallel path).
- * Single pass with branchless store: the second predicate scan and the
- * mispredictions it causes at mid selectivity both disappear.
- * Uses `@columna/native` Rayon when loaded and n is large enough.
+ * Dual comparison indices (shared by sync filter + parallel path).
+ * Uses `@columna/native` Rayon when loaded and n is large enough; any cmp op pair.
  */
-export function dualGtIndices(a: NumArr, b: NumArr, la: number, lb: number): Uint32Array {
+export function dualAndIndices(
+  a: NumArr,
+  b: NumArr,
+  opA: string,
+  litA: number,
+  opB: string,
+  litB: number,
+): Uint32Array {
   const n = a.length
-  if (n >= NATIVE_FILTER_MIN_ROWS && isNativeKernelsLoaded()) {
+  const codeA = CMP_OP_CODE[opA]
+  const codeB = CMP_OP_CODE[opB]
+  if (
+    codeA !== undefined &&
+    codeB !== undefined &&
+    n >= NATIVE_FILTER_MIN_ROWS &&
+    isNativeKernelsLoaded()
+  ) {
     const k = getNativeKernels()
-    const OP_GT = 2
     if (a instanceof Int32Array && b instanceof Float64Array && k.filterAnd2I32F64) {
-      return k.filterAnd2I32F64(a, b, OP_GT, la, OP_GT, lb)
+      return k.filterAnd2I32F64(a, b, codeA, litA, codeB, litB)
     }
     if (a instanceof Int32Array && b instanceof Int32Array && k.filterAnd2I32I32) {
-      return k.filterAnd2I32I32(a, b, OP_GT, la, OP_GT, lb)
+      return k.filterAnd2I32I32(a, b, codeA, litA, codeB, litB)
+    }
+    if (a instanceof Float64Array && b instanceof Float64Array && k.filterAnd2F64F64) {
+      return k.filterAnd2F64F64(a, b, codeA, litA, codeB, litB)
+    }
+    // i32+f64 with columns swapped
+    if (a instanceof Float64Array && b instanceof Int32Array && k.filterAnd2I32F64) {
+      return k.filterAnd2I32F64(b, a, codeB, litB, codeA, litA)
     }
   }
   const idx = new Uint32Array(n)
   let j = 0
+  const cmp = (op: string, v: number, lit: number) => {
+    switch (op) {
+      case 'gt':
+        return v > lit
+      case 'gte':
+        return v >= lit
+      case 'lt':
+        return v < lit
+      case 'lte':
+        return v <= lit
+      case 'eq':
+        return v === lit
+      case 'neq':
+        return v !== lit
+      default:
+        return false
+    }
+  }
   for (let i = 0; i < n; i++) {
-    idx[j] = i
-    j += (a[i]! > la ? 1 : 0) & (b[i]! > lb ? 1 : 0)
+    if (cmp(opA, a[i]!, litA) && cmp(opB, b[i]!, litB)) idx[j++] = i
   }
   return idx.subarray(0, j)
+}
+
+/** @deprecated Prefer dualAndIndices — kept for parallel worker path that still assumes gt∧gt. */
+export function dualGtIndices(a: NumArr, b: NumArr, la: number, lb: number): Uint32Array {
+  return dualAndIndices(a, b, 'gt', la, 'gt', lb)
 }
 
 /**
@@ -178,14 +232,15 @@ export function tryFastFilter(
   if (resolved) {
     const n = table.numRows
 
-    if (
-      resolved.length === 2 &&
-      resolved[0]!.op === 'gt' &&
-      resolved[1]!.op === 'gt' &&
-      !resolved[0]!.bitmap &&
-      !resolved[1]!.bitmap
-    ) {
-      const idx = dualGtIndices(resolved[0]!.data, resolved[1]!.data, resolved[0]!.lit, resolved[1]!.lit)
+    if (resolved.length === 2 && !resolved[0]!.bitmap && !resolved[1]!.bitmap) {
+      const idx = dualAndIndices(
+        resolved[0]!.data,
+        resolved[1]!.data,
+        resolved[0]!.op,
+        resolved[0]!.lit,
+        resolved[1]!.op,
+        resolved[1]!.lit,
+      )
       return gather(table, idx, keep)
     }
 
@@ -361,6 +416,7 @@ export function argsortNumeric(
   nullBitmap: Uint8Array | undefined,
   descending = false,
   order?: Uint32Array,
+  nullsLast = true,
 ): Uint32Array {
   const tmp = new Float64Array(1)
   const tv = new Uint32Array(tmp.buffer)
@@ -428,11 +484,20 @@ export function argsortNumeric(
 
   if (m === len) return idx.length === len ? idx : idx.slice(0, len)
   const out = new Uint32Array(len)
-  out.set(idx.subarray(0, m))
-  let k = m
-  for (let i = 0; i < len; i++) {
-    const row = order ? order[i]! : i
-    if (nullBitmap && !isValid(nullBitmap, row)) out[k++] = row
+  if (nullsLast) {
+    out.set(idx.subarray(0, m))
+    let k = m
+    for (let i = 0; i < len; i++) {
+      const row = order ? order[i]! : i
+      if (nullBitmap && !isValid(nullBitmap, row)) out[k++] = row
+    }
+  } else {
+    let k = 0
+    for (let i = 0; i < len; i++) {
+      const row = order ? order[i]! : i
+      if (nullBitmap && !isValid(nullBitmap, row)) out[k++] = row
+    }
+    out.set(idx.subarray(0, m), k)
   }
   return out
 }
@@ -492,24 +557,29 @@ export function sortKeyCodes(col: Column): { codes: NumArr; nullBitmap?: Uint8Ar
 
 export function tryFastSort(
   table: TableView,
-  by: Array<{ expr: ExprNode; descending: boolean }>,
+  by: Array<{ expr: ExprNode; descending: boolean; nullsLast?: boolean }>,
   limit?: number,
 ): TableView | null {
   if (by.length === 0) return null
   for (const k of by) if (k.expr.type !== 'col') return null
 
-  const keys: Array<{ codes: NumArr; nullBitmap?: Uint8Array; descending: boolean }> = []
+  const keys: Array<{ codes: NumArr; nullBitmap?: Uint8Array; descending: boolean; nullsLast: boolean }> = []
   for (const k of by) {
     const col = getColumn(table, (k.expr as { type: 'col'; name: string }).name)
     const sk = sortKeyCodes(col)
     if (!sk) return null
-    keys.push({ codes: sk.codes, nullBitmap: sk.nullBitmap, descending: k.descending })
+    keys.push({
+      codes: sk.codes,
+      nullBitmap: sk.nullBitmap,
+      descending: k.descending,
+      nullsLast: k.nullsLast !== false,
+    })
   }
 
   const n = table.numRows
 
-  // Top-k heap path: single numeric key only (existing behaviour).
-  if (limit !== undefined && limit > 0 && limit < n && by.length === 1) {
+  // Top-k heap path: single numeric key only (existing behaviour); skip when nullsFirst.
+  if (limit !== undefined && limit > 0 && limit < n && by.length === 1 && keys[0]!.nullsLast) {
     const col = getColumn(table, (by[0]!.expr as { type: 'col'; name: string }).name)
     const data = numericView(col)
     if (data) {
@@ -520,11 +590,52 @@ export function tryFastSort(
     }
   }
 
+  // Native Rayon argsort for large single-key numeric sorts (no limit / limit ≥ n).
+  if (
+    by.length === 1 &&
+    n >= NATIVE_SORT_MIN_ROWS &&
+    isNativeKernelsLoaded() &&
+    (limit === undefined || limit >= n)
+  ) {
+    const key = keys[0]!
+    const native = getNativeKernels()
+    let idx: Uint32Array | null = null
+    if (key.codes instanceof Float64Array && native.argsortF64 && !key.nullBitmap) {
+      // NaNs sorted via nulls_last; without bitmap treat NaN as null-like
+      idx = native.argsortF64(key.codes, key.descending, key.nullsLast)
+    } else if (key.codes instanceof Int32Array && native.argsortI32) {
+      idx = native.argsortI32(key.codes, key.descending, key.nullsLast, key.nullBitmap)
+    }
+    if (idx) {
+      if (limit !== undefined && limit > 0 && limit < n) return gather(table, idx.subarray(0, limit))
+      return gather(table, idx)
+    }
+  }
+
+  // Native Rayon multi-key argsort for large all-f64 sorts (no per-key null bitmap; NaN = null).
+  if (
+    by.length > 1 &&
+    n >= NATIVE_SORT_MULTI_MIN_ROWS &&
+    isNativeKernelsLoaded() &&
+    (limit === undefined || limit >= n)
+  ) {
+    const native = getNativeKernels()
+    if (native.argsortMultiF64 && keys.every((k) => k.codes instanceof Float64Array && !k.nullBitmap)) {
+      const idx = native.argsortMultiF64(
+        keys.map((k) => k.codes as Float64Array),
+        keys.map((k) => k.descending),
+        keys.map((k) => k.nullsLast),
+      )
+      if (limit !== undefined && limit > 0 && limit < n) return gather(table, idx.subarray(0, limit))
+      return gather(table, idx)
+    }
+  }
+
   // Successive stable radix: last key first, then earlier keys.
   let idx: Uint32Array | undefined
   for (let k = keys.length - 1; k >= 0; k--) {
     const key = keys[k]!
-    idx = argsortNumeric(key.codes, n, key.nullBitmap, key.descending, idx)
+    idx = argsortNumeric(key.codes, n, key.nullBitmap, key.descending, idx, key.nullsLast)
   }
   const final = idx!
   if (limit !== undefined && limit > 0 && limit < n) {
@@ -1148,11 +1259,20 @@ function tryNativeDenseGroupBy(
 ): TableView | null {
   const n = table.numRows
   if (n < NATIVE_GROUPBY_MIN_ROWS || !isNativeKernelsLoaded()) return null
-  const native = getNativeKernels().groupbySumsF64
-  if (!native) return null
-  if (!parsed.every((p) => p.op === 'sum' || p.op === 'mean' || p.op === 'count')) return null
+  const kernels = getNativeKernels()
+  if (!kernels.groupbySumsF64 && !kernels.groupbyMinmaxF64) return null
+
+  const opsOk = parsed.every(
+    (p) => p.op === 'sum' || p.op === 'mean' || p.op === 'count' || p.op === 'min' || p.op === 'max',
+  )
+  if (!opsOk) return null
   if (keyCols.some((c) => c.nullBitmap)) return null
   if (parsed.some((p) => p.op !== 'count' && p.col.nullBitmap)) return null
+
+  const wantSums = parsed.some((p) => p.op === 'sum' || p.op === 'mean' || p.op === 'count')
+  const wantMinMax = parsed.some((p) => p.op === 'min' || p.op === 'max')
+  if (wantSums && !kernels.groupbySumsF64) return null
+  if (wantMinMax && !kernels.groupbyMinmaxF64) return null
 
   const codeBufs = keyCols.map((c) => c.data as Uint32Array)
   let codes: Uint32Array
@@ -1174,7 +1294,7 @@ function tryNativeDenseGroupBy(
     }
   }
 
-  // Deduplicate value columns (same physical buffer can back sum+mean).
+  // Deduplicate value columns (same physical buffer can back sum+mean / min+max).
   const colSlots: Float64Array[] = []
   const colIndex = new Map<object, number>()
   const aggColIx: number[] = []
@@ -1193,17 +1313,22 @@ function tryNativeDenseGroupBy(
     aggColIx.push(ix)
   }
 
-  let out: { sums: Float64Array; counts: Float64Array; used: Uint8Array }
+  let sumsOut: { sums: Float64Array; counts: Float64Array; used: Uint8Array } | null = null
+  let mmOut: { mins: Float64Array; maxs: Float64Array; counts: Float64Array; used: Uint8Array } | null =
+    null
   try {
-    out = native(codes, card, colSlots)
+    if (wantSums) sumsOut = kernels.groupbySumsF64!(codes, card, colSlots)
+    if (wantMinMax) mmOut = kernels.groupbyMinmaxF64!(codes, card, colSlots)
   } catch {
     return null
   }
 
+  const used = (sumsOut ?? mmOut)!.used
+  const counts = (sumsOut ?? mmOut)!.counts
   const acc = makeDenseAggs(parsed, card, n)
   for (let c = 0; c < card; c++) {
-    if (!out.used[c]) continue
-    const rowCount = out.counts[c]!
+    if (!used[c]) continue
+    const rowCount = counts[c]!
     for (let a = 0; a < parsed.length; a++) {
       const idx = c * parsed.length + a
       const op = acc.ops[a]!
@@ -1212,13 +1337,25 @@ function tryNativeDenseGroupBy(
         continue
       }
       const ci = aggColIx[a]!
-      const sum = out.sums[ci * card + c]!
-      acc.sums[idx] = sum
-      acc.counts[idx] = rowCount
+      if (op === OP_MIN && mmOut) {
+        acc.mins![idx] = mmOut.mins[ci * card + c]!
+        acc.counts[idx] = rowCount
+        continue
+      }
+      if (op === OP_MAX && mmOut) {
+        acc.maxs![idx] = mmOut.maxs[ci * card + c]!
+        acc.counts[idx] = rowCount
+        continue
+      }
+      if (sumsOut) {
+        const sum = sumsOut.sums[ci * card + c]!
+        acc.sums[idx] = sum
+        acc.counts[idx] = rowCount
+      }
     }
   }
 
-  return materializeDenseGroups(out.used, card, acc, parsed, (pack, row, keyOuts) => {
+  return materializeDenseGroups(used, card, acc, parsed, (pack, row, keyOuts) => {
     let rem = pack
     for (let k = keyCols.length - 1; k >= 0; k--) {
       const stride = strides[k]!
@@ -1524,13 +1661,31 @@ function remapKeyToDictionary(col: Column, dict: string[]): NumArr | null {
   return null
 }
 
+function keepJoinColumns(table: TableView, keep?: readonly string[]): TableView {
+  if (!keep) return table
+  const byName = new Map(table.columns.map((c) => [c.field.name, c]))
+  const ordered: Column[] = []
+  for (const name of keep) {
+    const c = byName.get(name)
+    if (c) ordered.push(c)
+  }
+  return tableFromColumns(ordered)
+}
+
+/** Set by tryFastJoin when a specialized kernel runs; cleared at start of each attempt. */
+export let lastFastJoinKernel: { kernel: string; reason?: string } | null = null
+
 export function tryFastJoin(
   left: TableView,
   right: TableView,
   leftOn: string[],
   rightOn: string[],
   how: 'inner' | 'left' | 'right' | 'outer' | 'semi' | 'anti',
+  lSuffix = '',
+  rSuffix = '_right',
+  keep?: readonly string[],
 ): TableView | null {
+  lastFastJoinKernel = null
   if (how !== 'inner' && how !== 'left' && how !== 'semi' && how !== 'anti') return null
   if (leftOn.length !== 1 || rightOn.length !== 1) return null
 
@@ -1573,11 +1728,22 @@ export function tryFastJoin(
   let dense: Int32Array | null = null
   let hash: Map<number, number> | null = null
   if (useDense) {
-    dense = new Int32Array(span)
-    dense.fill(-1)
-    for (let i = 0; i < rn; i++) {
-      if (rCol.nullBitmap && !isValid(rCol.nullBitmap, i)) continue
-      dense[rData[i]! - rMin] = i
+    const nativeBuild = getNativeKernels().joinBuildDenseI32
+    if (
+      nativeBuild &&
+      rn >= NATIVE_JOIN_BUILD_MIN_ROWS &&
+      rData instanceof Int32Array &&
+      !rCol.nullBitmap &&
+      isNativeKernelsLoaded()
+    ) {
+      dense = nativeBuild(rData, rMin | 0)
+    } else {
+      dense = new Int32Array(span)
+      dense.fill(-1)
+      for (let i = 0; i < rn; i++) {
+        if (rCol.nullBitmap && !isValid(rCol.nullBitmap, i)) continue
+        dense[rData[i]! - rMin] = i
+      }
     }
   } else {
     hash = new Map()
@@ -1607,7 +1773,12 @@ export function tryFastJoin(
       const semi = getNativeKernels().joinSemiDenseI32
       if (semi) {
         const idx = semi(lData, dense, rMin | 0, how === 'semi')
-        return takeTable(left, idx)
+        lastFastJoinKernel = {
+          kernel: 'native:joinSemiDenseI32',
+          reason: `probe left=${ln} ≥ NATIVE_JOIN_MIN_ROWS=${NATIVE_JOIN_MIN_ROWS}; build(right)=${rn}`,
+        }
+        const taken = takeTable(left, idx)
+        return keepJoinColumns(taken, keep)
       }
     }
     const idx = new Uint32Array(ln)
@@ -1621,14 +1792,24 @@ export function tryFastJoin(
       const hit = probe(lData[i]!) >= 0
       if (hit === wantHit) idx[j++] = i
     }
-    return takeTable(left, idx.subarray(0, j))
+    lastFastJoinKernel = { kernel: 'js:joinSemiAnti' }
+    return keepJoinColumns(takeTable(left, idx.subarray(0, j)), keep)
   }
 
   // Right columns to emit (skip join key when names collide / same)
   const leftNames = new Set(left.schema.map((f) => f.name))
+  const rightNames = new Set(right.schema.map((f) => f.name))
   const rightEmit = right.columns.filter(
     (col) => !(rightOn[0] === col.field.name && leftOn[0] === col.field.name),
   )
+
+  const renameLeft = (col: Column): Column => {
+    const sharedKey = leftOn[0] === col.field.name && rightOn[0] === col.field.name
+    if (sharedKey || !rightNames.has(col.field.name) || !lSuffix) return col
+    return { ...col, field: { ...col.field, name: `${col.field.name}${lSuffix}` } }
+  }
+  const rightOutName = (name: string): string =>
+    leftNames.has(name) ? `${name}${rSuffix}` : name
 
   // Single left probe: over-allocate to ln, then subarray. Identity-left when every row matches.
   const leftIdx = new Uint32Array(ln)
@@ -1648,6 +1829,10 @@ export function tryFastJoin(
     if (probeNative) {
       const probedRight = probeNative(lData, dense, rMin | 0)
       probed = true
+      lastFastJoinKernel = {
+        kernel: 'native:joinProbeDenseI32',
+        reason: `probe left=${ln} ≥ NATIVE_JOIN_MIN_ROWS=${NATIVE_JOIN_MIN_ROWS}; build(right)=${rn}`,
+      }
       if (how === 'inner') {
         for (let i = 0; i < ln; i++) {
           const r = probedRight[i]!
@@ -1703,14 +1888,24 @@ export function tryFastJoin(
   const rightGather = rightIdx.subarray(0, outCount)
 
   const outCols: Column[] = []
+  const keepSet = keep ? new Set(keep) : null
+  const want = (name: string) => !keepSet || keepSet.has(name)
+
   if (identityLeft) {
-    for (const col of left.columns) outCols.push(col)
+    for (const col of left.columns) {
+      const renamed = renameLeft(col)
+      if (want(renamed.field.name)) outCols.push(renamed)
+    }
   } else {
-    for (const col of left.columns) outCols.push(takeColumn(col, leftGather!))
+    for (const col of left.columns) {
+      const renamed = renameLeft(takeColumn(col, leftGather!))
+      if (want(renamed.field.name)) outCols.push(renamed)
+    }
   }
 
   for (const col of rightEmit) {
-    const name = leftNames.has(col.field.name) ? `${col.field.name}_right` : col.field.name
+    const name = rightOutName(col.field.name)
+    if (!want(name)) continue
     if (how === 'inner') {
       const taken = takeColumn(col, rightGather)
       outCols.push({ ...taken, field: { ...taken.field, name } })
@@ -1736,6 +1931,33 @@ export function tryFastJoin(
       field: { ...taken.field, name, nullable: anyNull || taken.field.nullable },
       nullBitmap: anyNull ? nullBitmap : taken.nullBitmap,
     })
+  }
+  if (keep) {
+    const byName = new Map(outCols.map((c) => [c.field.name, c]))
+    const ordered: Column[] = []
+    for (const name of keep) {
+      const c = byName.get(name)
+      if (c) ordered.push(c)
+    }
+    if (!lastFastJoinKernel) {
+      lastFastJoinKernel = {
+        kernel: useDense ? 'js:joinDense' : 'js:joinHash',
+        reason:
+          ln < NATIVE_JOIN_MIN_ROWS
+            ? `probe left=${ln} < NATIVE_JOIN_MIN_ROWS=${NATIVE_JOIN_MIN_ROWS}; build(right)=${rn}`
+            : `build(right)=${rn}`,
+      }
+    }
+    return tableFromColumns(ordered)
+  }
+  if (!lastFastJoinKernel) {
+    lastFastJoinKernel = {
+      kernel: useDense ? 'js:joinDense' : 'js:joinHash',
+      reason:
+        ln < NATIVE_JOIN_MIN_ROWS
+          ? `probe left=${ln} < NATIVE_JOIN_MIN_ROWS=${NATIVE_JOIN_MIN_ROWS}; build(right)=${rn}`
+          : `build(right)=${rn}`,
+    }
   }
   return tableFromColumns(outCols)
 }
@@ -1802,6 +2024,158 @@ export function tryFusedFilterGroupBy(
   return materializeDenseGroups(used, card, acc, parsed, (pack, row, keyOuts) => {
     keyOuts[0]![row] = dict[pack]!
   }, [keyCol.field.name])
+}
+
+/**
+ * Filter ∧ unique in one pass: only rows that pass the predicate enter the uniqueness map.
+ * Avoids materializing a full filtered table when the predicate is cmp / vectorizable.
+ * Key encoding matches uniqueTableInMemory (codes for category, not dictionary labels).
+ */
+export function tryFusedFilterUnique(
+  table: TableView,
+  predicate: ExprNode,
+  columns: string[] | undefined,
+  keep: 'first' | 'last' | 'none',
+): TableView | null {
+  const n = table.numRows
+  if (n === 0) return gather(table, [])
+  const cols = columns ?? table.schema.map((f) => f.name)
+  if (cols.length === 0) return null
+
+  const resolved = resolveCmps(table, predicate)
+  let mask: ReturnType<typeof evalVec> | null = null
+  if (!resolved) {
+    mask = evalVec(table, predicate, n)
+    if (!mask) return null
+  }
+
+  const passes = (i: number): boolean => {
+    if (resolved) {
+      for (const r of resolved) if (!cmpAt(r, i)) return false
+      return true
+    }
+    return truthy(mask!, i)
+  }
+
+  const seen = new Map<string, number>()
+  const order: string[] = []
+  for (let i = 0; i < n; i++) {
+    if (!passes(i)) continue
+    const key = cols
+      .map((name) => {
+        const c = getColumn(table, name)
+        if (!isValid(c.nullBitmap, i)) return '∅'
+        return String(getValue(c.data, i))
+      })
+      .join('\0')
+    if (!seen.has(key)) {
+      seen.set(key, i)
+      order.push(key)
+    } else if (keep === 'last') {
+      seen.set(key, i)
+    } else if (keep === 'none') {
+      seen.set(key, -1)
+    }
+  }
+  const indices = order.map((k) => seen.get(k)!).filter((i) => i >= 0)
+  return gather(table, indices)
+}
+
+/**
+ * Filter ∧ sort ∧ limit without a full filtered intermediate when possible.
+ * Prefers one-pass top-k over rows that pass the predicate; otherwise fast-filter then limited sort.
+ */
+export function tryFusedFilterSortLimit(
+  table: TableView,
+  predicate: ExprNode,
+  by: Array<{ expr: ExprNode; descending: boolean; nullsLast?: boolean }>,
+  limit: number,
+): TableView | null {
+  const n = table.numRows
+  if (limit <= 0) return gather(table, [])
+  if (n === 0) return gather(table, [])
+
+  // One-pass top-k: cmp/vector filter ∧ single numeric column key (nulls last).
+  if (by.length === 1 && by[0]!.expr.type === 'col' && by[0]!.nullsLast !== false) {
+    const col = getColumn(table, (by[0]!.expr as { type: 'col'; name: string }).name)
+    const data = numericView(col)
+    if (data) {
+      const resolved = resolveCmps(table, predicate)
+      let mask: ReturnType<typeof evalVec> | null = null
+      if (!resolved) {
+        mask = evalVec(table, predicate, n)
+      }
+      if (resolved || mask) {
+        const descending = by[0]!.descending
+        const bitmap = col.nullBitmap
+        const heapIdx = new Uint32Array(limit)
+        const heapVal = new Float64Array(limit)
+        let size = 0
+        const worse = (a: number, b: number) => (descending ? a < b : a > b)
+        const siftUp = (pos: number) => {
+          while (pos > 0) {
+            const parent = (pos - 1) >> 1
+            if (!worse(heapVal[pos]!, heapVal[parent]!)) break
+            const ti = heapIdx[parent]!
+            const tv = heapVal[parent]!
+            heapIdx[parent] = heapIdx[pos]!
+            heapVal[parent] = heapVal[pos]!
+            heapIdx[pos] = ti
+            heapVal[pos] = tv
+            pos = parent
+          }
+        }
+        const siftDown = (pos: number) => {
+          for (;;) {
+            let worst = pos
+            const l = pos * 2 + 1
+            const r = l + 1
+            if (l < size && worse(heapVal[l]!, heapVal[worst]!)) worst = l
+            if (r < size && worse(heapVal[r]!, heapVal[worst]!)) worst = r
+            if (worst === pos) break
+            const ti = heapIdx[worst]!
+            const tv = heapVal[worst]!
+            heapIdx[worst] = heapIdx[pos]!
+            heapVal[worst] = heapVal[pos]!
+            heapIdx[pos] = ti
+            heapVal[pos] = tv
+            pos = worst
+          }
+        }
+        outer: for (let i = 0; i < n; i++) {
+          if (resolved) {
+            for (const r of resolved) if (!cmpAt(r, i)) continue outer
+          } else if (!truthy(mask!, i)) continue
+          if (bitmap && !isValid(bitmap, i)) continue
+          const v = data[i]!
+          if (size < limit) {
+            heapIdx[size] = i
+            heapVal[size] = v
+            siftUp(size++)
+          } else if (worse(heapVal[0]!, v)) {
+            heapIdx[0] = i
+            heapVal[0] = v
+            siftDown(0)
+          }
+        }
+        const order = new Uint32Array(size)
+        for (let i = 0; i < size; i++) order[i] = i
+        order.sort((ia, ib) => {
+          const d = heapVal[ia]! - heapVal[ib]!
+          return descending ? (d > 0 ? -1 : d < 0 ? 1 : 0) : d > 0 ? 1 : d < 0 ? -1 : 0
+        })
+        const idx = new Uint32Array(size)
+        for (let i = 0; i < size; i++) idx[i] = heapIdx[order[i]!]!
+        return gather(table, idx)
+      }
+    }
+  }
+
+  // Fallback: fast filter, then limited sort on the reduced table.
+  const filtered = tryFastFilter(table, predicate)
+  if (!filtered) return null
+  const sorted = tryFastSort(filtered, by, limit)
+  return sorted
 }
 
 /**
@@ -2026,6 +2400,26 @@ export function tryFastUnique(
   }
 
   // Multi category keys → packed dense unique
+  // Native parallel unique for all-f64 columns (keep:'first' only).
+  if (keep === 'first' && isNativeKernelsLoaded() && table.numRows >= NATIVE_UNIQUE_MIN_ROWS) {
+    const nativeUnique = getNativeKernels().uniqueF64
+    if (nativeUnique) {
+      const f64Cols: Float64Array[] = []
+      let ok = true
+      for (const name of cols) {
+        const c = getColumn(table, name)
+        if (c.dictionary || c.nullBitmap) { ok = false; break }
+        const data = numericView(c)
+        if (!(data instanceof Float64Array)) { ok = false; break }
+        f64Cols.push(data)
+      }
+      if (ok && f64Cols.length > 0) {
+        const idx = nativeUnique(f64Cols)
+        return gather(table, idx)
+      }
+    }
+  }
+
   const keyCols: Column[] = []
   const cards: number[] = []
   const strides: number[] = []

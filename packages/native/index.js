@@ -310,14 +310,22 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { filterAnd2I32F64, filterAnd2I32I32, gatherF64, gatherI32, joinProbeDenseI32, joinSemiDenseI32, groupbySumsF64, strContains, strToLower, parseCsvUnquoted, writeCsvUnquoted } = nativeBinding
+const { filterAnd2I32F64, filterAnd2I32I32, filterAnd2F64F64, argsortF64, argsortI32, groupbyMinmaxF64, gatherF64, gatherI32, joinProbeDenseI32, joinSemiDenseI32, filterF64, argsortMultiF64, uniqueF64, joinBuildDenseI32, groupbySumsF64, strContains, strToLower, parseCsvUnquoted, writeCsvUnquoted } = nativeBinding
 
 module.exports.filterAnd2I32F64 = filterAnd2I32F64
 module.exports.filterAnd2I32I32 = filterAnd2I32I32
+module.exports.filterAnd2F64F64 = filterAnd2F64F64
+module.exports.argsortF64 = argsortF64
+module.exports.argsortI32 = argsortI32
+module.exports.groupbyMinmaxF64 = groupbyMinmaxF64
 module.exports.gatherF64 = gatherF64
 module.exports.gatherI32 = gatherI32
 module.exports.joinProbeDenseI32 = joinProbeDenseI32
 module.exports.joinSemiDenseI32 = joinSemiDenseI32
+module.exports.filterF64 = filterF64
+module.exports.argsortMultiF64 = argsortMultiF64
+module.exports.uniqueF64 = uniqueF64
+module.exports.joinBuildDenseI32 = joinBuildDenseI32
 module.exports.groupbySumsF64 = groupbySumsF64
 module.exports.strContains = strContains
 module.exports.strToLower = strToLower

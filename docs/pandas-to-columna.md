@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/columna-mark.png" alt="columna" width="96" />
+</p>
+
 # pandas → columna
 
 | pandas | columna |

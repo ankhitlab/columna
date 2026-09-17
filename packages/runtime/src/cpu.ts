@@ -18,8 +18,9 @@ import {
   type TableView,
 } from '@columna/arrow'
 import type { AggKind, Backend, CorrMethod, ExecContext, ExprNode, JoinKind, PlanNode, QuantileMethod, RankMethod } from './types.js'
-import { PARALLEL_MIN_ROWS } from './parallel.js'
-import { isNativeKernelsLoaded, NATIVE_FILTER_MIN_ROWS } from './native_kernels.js'
+import { parallelDualGtIndices, parallelTakeTable, parallelFilter, parallelSort, parallelGroupBy, parallelUnique, PARALLEL_FILTER_MIN_ROWS, PARALLEL_SORT_MIN_ROWS, PARALLEL_GROUPBY_MIN_ROWS, PARALLEL_UNIQUE_MIN_ROWS } from './parallel.js'
+import { optimizePlan, joinOrderChanged, estimatePlanRows } from './optimize.js'
+import { tryLoadNativeKernels, NATIVE_JOIN_MIN_ROWS } from './native_kernels.js'
 import { orderRows, overAggregateNumeric, overCumulativeNumeric, partitionIds, type Partition } from './over.js'
 import {
   applyMathOp,
@@ -34,10 +35,13 @@ import {
   tryFastFilter,
   tryFastGroupBy,
   tryFastJoin,
+  lastFastJoinKernel,
   tryFastRolling,
   tryFastSort,
   tryFastUnique,
   tryFusedFilterGroupBy,
+  tryFusedFilterUnique,
+  tryFusedFilterSortLimit,
   tryChunkedGroupBy,
   gather,
 } from './fast.js'
@@ -45,8 +49,6 @@ import { memoryBudget, recordLiveBytes } from './memory.js'
 import { externalSortTable, joinTablesSpilled, needsSpill, uniqueTableSpilled } from './spill_ops.js'
 import { spillRead, spillUnlink, spillWrite } from './spill.js'
 import { createFilterView, ensureMaterialized } from './views.js'
-import { pushdownProjections } from './pushdown.js'
-import { parallelDualGtIndices, parallelTakeTable } from './parallel.js'
 import {
   asofJoinTables,
   expandingTable,
@@ -877,7 +879,7 @@ function filterTable(table: TableView, predicate: ExprNode, keep?: readonly stri
 
 function sortTable(
   table: TableView,
-  by: Array<{ expr: ExprNode; descending: boolean }>,
+  by: Array<{ expr: ExprNode; descending: boolean; nullsLast?: boolean }>,
   limit?: number,
 ): TableView {
   table = ensureMaterialized(table)
@@ -899,7 +901,7 @@ function sortTable(
 
 function sortTableInMemory(
   table: TableView,
-  by: Array<{ expr: ExprNode; descending: boolean }>,
+  by: Array<{ expr: ExprNode; descending: boolean; nullsLast?: boolean }>,
   limit?: number,
 ): TableView {
   const fast = tryFastSort(table, by, limit)
@@ -910,7 +912,8 @@ function sortTableInMemory(
 
   // Prefetch column keys for bare col exprs to avoid evalExprScalar per comparison.
   type KeyFn = (row: number) => number | string | boolean | null
-  const keyFns: Array<{ at: KeyFn; descending: boolean }> = by.map((key) => {
+  const keyFns: Array<{ at: KeyFn; descending: boolean; nullsLast: boolean }> = by.map((key) => {
+    const nullsLast = key.nullsLast !== false
     if (key.expr.type === 'col') {
       const col = getColumn(table, key.expr.name)
       const dtype = col.field.dtype
@@ -920,11 +923,12 @@ function sortTableInMemory(
         if (dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? null
         return v as number | string | boolean
       }
-      return { at, descending: key.descending }
+      return { at, descending: key.descending, nullsLast }
     }
     return {
       at: (row) => evalExprScalar(key.expr, table, row),
       descending: key.descending,
+      nullsLast,
     }
   })
 
@@ -933,8 +937,8 @@ function sortTableInMemory(
       const va = key.at(a)
       const vb = key.at(b)
       if (va === vb) continue
-      if (va === null) return 1
-      if (vb === null) return -1
+      if (va === null) return key.nullsLast ? 1 : -1
+      if (vb === null) return key.nullsLast ? -1 : 1
       const cmp = va < vb ? -1 : 1
       return key.descending ? -cmp : cmp
     }
@@ -1157,23 +1161,51 @@ function expandCrossColumn(col: Column, mode: 'repeat' | 'tile', ln: number, rn:
   }
 }
 
-function crossJoinTables(left: TableView, right: TableView): TableView {
+/** Resolve output name for a join side column when the other side shares the name. */
+function joinSideName(
+  name: string,
+  side: 'left' | 'right',
+  otherHasName: boolean,
+  sharedKey: boolean,
+  lSuffix: string,
+  rSuffix: string,
+): string {
+  if (sharedKey || !otherHasName) return name
+  if (side === 'left') return lSuffix ? `${name}${lSuffix}` : name
+  return `${name}${rSuffix}`
+}
+
+function crossJoinTables(
+  left: TableView,
+  right: TableView,
+  lSuffix = '',
+  rSuffix = '_right',
+): TableView {
   const ln = left.numRows
   const rn = right.numRows
+  const leftNames = new Set(left.schema.map((f) => f.name))
+  const rightNames = new Set(right.schema.map((f) => f.name))
   if (ln === 0 || rn === 0) {
     return tableFromColumns([
-      ...left.columns.map((c) => takeColumn(c, [])),
+      ...left.columns.map((c) => {
+        const name = joinSideName(c.field.name, 'left', rightNames.has(c.field.name), false, lSuffix, rSuffix)
+        const taken = takeColumn(c, [])
+        return name === c.field.name ? taken : { ...taken, field: { ...taken.field, name } }
+      }),
       ...right.columns.map((c) => {
-        const name = left.schema.some((f) => f.name === c.field.name) ? `${c.field.name}_right` : c.field.name
+        const name = joinSideName(c.field.name, 'right', leftNames.has(c.field.name), false, lSuffix, rSuffix)
         return { ...takeColumn(c, []), field: { ...c.field, name } }
       }),
     ])
   }
-  const leftNames = new Set(left.schema.map((f) => f.name))
   const out: Column[] = []
-  for (const col of left.columns) out.push(expandCrossColumn(col, 'repeat', ln, rn))
+  for (const col of left.columns) {
+    const name = joinSideName(col.field.name, 'left', rightNames.has(col.field.name), false, lSuffix, rSuffix)
+    const expanded = expandCrossColumn(col, 'repeat', ln, rn)
+    out.push(name === col.field.name ? expanded : { ...expanded, field: { ...expanded.field, name } })
+  }
   for (const col of right.columns) {
-    const name = leftNames.has(col.field.name) ? `${col.field.name}_right` : col.field.name
+    const name = joinSideName(col.field.name, 'right', leftNames.has(col.field.name), false, lSuffix, rSuffix)
     const expanded = expandCrossColumn(col, 'tile', ln, rn)
     out.push({ ...expanded, field: { ...expanded.field, name } })
   }
@@ -1186,29 +1218,64 @@ function joinTables(
   leftOn: string[],
   rightOn: string[],
   how: JoinKind,
+  lSuffix = '',
+  rSuffix = '_right',
+  validate?: '1:1' | '1:m' | 'm:1',
+  keep?: readonly string[],
 ): TableView {
   left = ensureMaterialized(left)
   right = ensureMaterialized(right)
-  if (how === 'cross') return crossJoinTables(left, right)
+  if (how === 'cross') return crossJoinTables(left, right, lSuffix, rSuffix)
+
+  if (validate) assertJoinValidate(left, right, leftOn, rightOn, validate)
 
   const working = estimateTableBytes(left) + estimateTableBytes(right)
   recordLiveBytes(working)
   if (needsSpill(left) || needsSpill(right) || (memoryBudgetSafe() && working * 2 > memoryBudgetSafe()!)) {
     if (how === 'inner') {
-      return joinTablesSpilled(left, right, (l, r) => joinTablesInMemory(l, r, leftOn, rightOn, how))
+      return joinTablesSpilled(left, right, (l, r) =>
+        joinTablesInMemory(l, r, leftOn, rightOn, how, lSuffix, rSuffix, keep),
+      )
     }
     // Non-inner: spill the larger side to account for budget, then join in memory after reload.
     const spillTarget = estimateTableBytes(right) >= estimateTableBytes(left) ? right : left
     const path = spillWrite(spillTarget)
     try {
       const reloaded = spillRead(path)
-      if (spillTarget === right) return joinTablesInMemory(left, reloaded, leftOn, rightOn, how)
-      return joinTablesInMemory(reloaded, right, leftOn, rightOn, how)
+      if (spillTarget === right) return joinTablesInMemory(left, reloaded, leftOn, rightOn, how, lSuffix, rSuffix, keep)
+      return joinTablesInMemory(reloaded, right, leftOn, rightOn, how, lSuffix, rSuffix, keep)
     } finally {
       spillUnlink(path)
     }
   }
-  return joinTablesInMemory(left, right, leftOn, rightOn, how)
+  return joinTablesInMemory(left, right, leftOn, rightOn, how, lSuffix, rSuffix, keep)
+}
+
+function assertJoinValidate(
+  left: TableView,
+  right: TableView,
+  leftOn: string[],
+  rightOn: string[],
+  validate: '1:1' | '1:m' | 'm:1',
+): void {
+  const needLeft = validate === '1:1' || validate === '1:m'
+  const needRight = validate === '1:1' || validate === 'm:1'
+  if (needLeft && !joinKeysUnique(left, leftOn)) {
+    throw new Error(`join validate '${validate}': left keys are not unique`)
+  }
+  if (needRight && !joinKeysUnique(right, rightOn)) {
+    throw new Error(`join validate '${validate}': right keys are not unique`)
+  }
+}
+
+function joinKeysUnique(table: TableView, cols: string[]): boolean {
+  const seen = new Set<string>()
+  for (let i = 0; i < table.numRows; i++) {
+    const k = joinKey(table, cols, i)
+    if (seen.has(k)) return false
+    seen.add(k)
+  }
+  return true
 }
 
 function memoryBudgetSafe(): number | undefined {
@@ -1221,11 +1288,14 @@ function joinTablesInMemory(
   leftOn: string[],
   rightOn: string[],
   how: JoinKind,
+  lSuffix = '',
+  rSuffix = '_right',
+  keep?: readonly string[],
 ): TableView {
-  if (how === 'cross') return crossJoinTables(left, right)
+  if (how === 'cross') return crossJoinTables(left, right, lSuffix, rSuffix)
 
   if (how === 'inner' || how === 'left' || how === 'right' || how === 'outer' || how === 'semi' || how === 'anti') {
-    const fast = tryFastJoin(left, right, leftOn, rightOn, how)
+    const fast = tryFastJoin(left, right, leftOn, rightOn, how, lSuffix, rSuffix, keep)
     if (fast) return fast
   }
 
@@ -1247,7 +1317,8 @@ function joinTablesInMemory(
       const has = Boolean(hits && hits.length)
       if ((how === 'semi' && has) || (how === 'anti' && !has)) indices.push(i)
     }
-    return takeTable(left, indices)
+    const taken = takeTable(left, indices)
+    return keep ? project(taken, [...keep]) : taken
   }
 
   const leftIdx: number[] = []
@@ -1278,7 +1349,7 @@ function joinTablesInMemory(
     }
   }
 
-  return assembleJoin(left, right, leftIdx, rightIdx, leftOn, rightOn)
+  return assembleJoin(left, right, leftIdx, rightIdx, leftOn, rightOn, lSuffix, rSuffix, keep)
 }
 
 function assembleJoin(
@@ -1288,6 +1359,9 @@ function assembleJoin(
   rightIdx: Array<number | null>,
   leftOn: string[],
   rightOn: string[],
+  lSuffix = '',
+  rSuffix = '_right',
+  keep?: readonly string[],
 ): TableView {
   const outCols: Column[] = []
   const leftGather = new Uint32Array(leftIdx.length)
@@ -1299,27 +1373,56 @@ function assembleJoin(
       leftHasSentinel = true
     } else leftGather[i] = v
   }
+  const rightNames = new Set(right.schema.map((f) => f.name))
   for (const col of left.columns) {
+    const keyIdx = leftOn.indexOf(col.field.name)
+    const sharedKey = keyIdx >= 0 && rightOn.includes(col.field.name)
+    const name = joinSideName(col.field.name, 'left', rightNames.has(col.field.name), sharedKey, lSuffix, rSuffix)
     const cloned = takeColumn(col, leftGather)
+    let renamed = name === col.field.name ? cloned : { ...cloned, field: { ...cloned.field, name } }
     if (!leftHasSentinel) {
-      outCols.push(cloned)
+      outCols.push(renamed)
       continue
     }
-    let anyNull = Boolean(cloned.nullBitmap)
-    const nullBitmap = cloned.nullBitmap
-      ? new Uint8Array(cloned.nullBitmap)
+    let anyNull = Boolean(renamed.nullBitmap)
+    const nullBitmap = renamed.nullBitmap
+      ? new Uint8Array(renamed.nullBitmap)
       : new Uint8Array(Math.ceil(leftIdx.length / 8) || 1)
-    if (!cloned.nullBitmap) nullBitmap.fill(0xff)
+    if (!renamed.nullBitmap) nullBitmap.fill(0xff)
+    const data = sharedKey ? copyTyped(renamed.data) : renamed.data
+    const rKeyCol = sharedKey ? getColumn(right, rightOn[keyIdx]!) : null
     for (let i = 0; i < leftIdx.length; i++) {
-      if (leftIdx[i]! < 0) {
-        setValid(nullBitmap, i, false)
-        anyNull = true
+      if (leftIdx[i]! >= 0) continue
+      if (sharedKey && rKeyCol) {
+        const rj = rightIdx[i]
+        if (rj !== null && isValid(rKeyCol.nullBitmap, rj)) {
+          if (rKeyCol.field.dtype === 'category' && rKeyCol.dictionary) {
+            const code = Number(getValue(rKeyCol.data, rj))
+            const label = String(rKeyCol.dictionary[code] ?? '')
+            let dict = renamed.dictionary ? [...renamed.dictionary] : []
+            let leftCode = dict.indexOf(label)
+            if (leftCode < 0) {
+              leftCode = dict.length
+              dict = [...dict, label]
+            }
+            ;(data as Uint32Array)[i] = leftCode
+            renamed = { ...renamed, dictionary: dict, data }
+          } else {
+            const v = getValue(rKeyCol.data, rj)
+            setValue(data, i, v as number | string | boolean, renamed.field.dtype)
+          }
+          setValid(nullBitmap, i, true)
+          continue
+        }
       }
+      setValid(nullBitmap, i, false)
+      anyNull = true
     }
     outCols.push({
-      ...cloned,
+      ...renamed,
+      data,
       nullBitmap: anyNull ? nullBitmap : undefined,
-      field: { ...cloned.field, nullable: anyNull || cloned.field.nullable },
+      field: { ...renamed.field, nullable: anyNull || renamed.field.nullable },
     })
   }
 
@@ -1334,8 +1437,9 @@ function assembleJoin(
     } else rightGather[i] = v
   }
   for (const col of right.columns) {
-    if (rightOn.includes(col.field.name) && leftOn.includes(col.field.name)) continue
-    const name = leftNames.has(col.field.name) ? `${col.field.name}_right` : col.field.name
+    const sharedKey = rightOn.includes(col.field.name) && leftOn.includes(col.field.name)
+    if (sharedKey) continue
+    const name = joinSideName(col.field.name, 'right', leftNames.has(col.field.name), false, lSuffix, rSuffix)
     const cloned = takeColumn(col, rightGather)
     if (!rightHasSentinel) {
       outCols.push({ ...cloned, field: { ...cloned.field, name } })
@@ -1359,19 +1463,127 @@ function assembleJoin(
     })
   }
 
+  if (keep) {
+    const byName = new Map(outCols.map((c) => [c.field.name, c]))
+    const ordered: Column[] = []
+    for (const name of keep) {
+      const c = byName.get(name)
+      if (c) ordered.push(c)
+    }
+    return tableFromColumns(ordered)
+  }
   return tableFromColumns(outCols)
 }
 
-function fillNullTable(table: TableView, value: number | string | boolean, columns?: string[]): TableView {
+function fillNullTable(
+  table: TableView,
+  value?: number | string | boolean,
+  columns?: string[],
+  values?: Record<string, number | string | boolean>,
+): TableView {
+  const fillOne = (col: Column, fill: number | string | boolean): Column => {
+    if (!col.nullBitmap) return col
+    if (col.field.dtype === 'category') {
+      const dict = col.dictionary ? [...col.dictionary] : []
+      let code = dict.indexOf(String(fill))
+      if (code < 0) {
+        code = dict.length
+        dict.push(String(fill))
+      }
+      const data = copyTyped(col.data) as Uint32Array
+      for (let i = 0; i < table.numRows; i++) {
+        if (!isValid(col.nullBitmap, i)) data[i] = code
+      }
+      return { field: { ...col.field, nullable: false }, data, dictionary: dict }
+    }
+    const data = copyTyped(col.data)
+    for (let i = 0; i < table.numRows; i++) {
+      if (!isValid(col.nullBitmap, i)) setValue(data, i, fill, col.field.dtype)
+    }
+    return {
+      field: { ...col.field, nullable: false },
+      data,
+      dictionary: col.dictionary ? [...col.dictionary] : undefined,
+    }
+  }
+
+  if (values) {
+    return tableFromColumns(
+      table.columns.map((col) => (col.field.name in values ? fillOne(col, values[col.field.name]!) : col)),
+    )
+  }
+  const names = columns ?? table.schema.map((f) => f.name)
+  const fill = value!
+  return tableFromColumns(table.columns.map((col) => (names.includes(col.field.name) ? fillOne(col, fill) : col)))
+}
+
+/** Copy a cell without dtype decoding (works for category codes). */
+function copyCell(data: Column['data'], from: number, to: number): void {
+  if (Array.isArray(data)) {
+    ;(data as unknown[])[to] = (data as unknown[])[from]
+    return
+  }
+  ;(data as Float64Array)[to] = (data as Float64Array)[from]!
+}
+
+function ffillTable(table: TableView, columns?: string[]): TableView {
   const names = columns ?? table.schema.map((f) => f.name)
   return tableFromColumns(
     table.columns.map((col) => {
       if (!names.includes(col.field.name) || !col.nullBitmap) return col
       const data = copyTyped(col.data)
+      const nullBitmap = new Uint8Array(col.nullBitmap)
+      let last = -1
+      let anyNull = false
       for (let i = 0; i < table.numRows; i++) {
-        if (!isValid(col.nullBitmap, i)) setValue(data, i, value, col.field.dtype)
+        if (isValid(col.nullBitmap, i)) {
+          last = i
+          setValid(nullBitmap, i, true)
+        } else if (last >= 0) {
+          copyCell(data, last, i)
+          setValid(nullBitmap, i, true)
+        } else {
+          anyNull = true
+          setValid(nullBitmap, i, false)
+        }
       }
-      return { field: { ...col.field, nullable: false }, data, dictionary: col.dictionary ? [...col.dictionary] : undefined }
+      return {
+        field: { ...col.field, nullable: anyNull },
+        data,
+        nullBitmap: anyNull ? nullBitmap : undefined,
+        dictionary: col.dictionary ? [...col.dictionary] : undefined,
+      }
+    }),
+  )
+}
+
+function bfillTable(table: TableView, columns?: string[]): TableView {
+  const names = columns ?? table.schema.map((f) => f.name)
+  return tableFromColumns(
+    table.columns.map((col) => {
+      if (!names.includes(col.field.name) || !col.nullBitmap) return col
+      const data = copyTyped(col.data)
+      const nullBitmap = new Uint8Array(col.nullBitmap)
+      let next = -1
+      let anyNull = false
+      for (let i = table.numRows - 1; i >= 0; i--) {
+        if (isValid(col.nullBitmap, i)) {
+          next = i
+          setValid(nullBitmap, i, true)
+        } else if (next >= 0) {
+          copyCell(data, next, i)
+          setValid(nullBitmap, i, true)
+        } else {
+          anyNull = true
+          setValid(nullBitmap, i, false)
+        }
+      }
+      return {
+        field: { ...col.field, nullable: anyNull },
+        data,
+        nullBitmap: anyNull ? nullBitmap : undefined,
+        dictionary: col.dictionary ? [...col.dictionary] : undefined,
+      }
     }),
   )
 }
@@ -2093,7 +2305,8 @@ function pivotTable(
 }
 
 export function executeCpu(plan: PlanNode): TableView {
-  plan = pushdownProjections(plan)
+  // Ensure direct executeCpu callers (sync DataFrame helpers / tests) get the same rewrites as Runtime.
+  plan = optimizePlan(plan)
   return ensureMaterialized(executeCpuNode(plan))
 }
 
@@ -2112,6 +2325,30 @@ function executeCpuNode(plan: PlanNode): TableView {
           return project(ensureMaterialized(filtered), plan.columns)
         }
       }
+      // Project after join: only materialize requested output columns.
+      if (plan.input.type === 'join' && plan.input.how !== 'cross') {
+        const names = projectColumnNames(plan.columns)
+        if (names) {
+          const joined = joinTables(
+            executeCpuNode(plan.input.left),
+            executeCpuNode(plan.input.right),
+            plan.input.leftOn,
+            plan.input.rightOn,
+            plan.input.how,
+            plan.input.lSuffix ?? '',
+            plan.input.rSuffix ?? '_right',
+            plan.input.validate,
+            names,
+          )
+          if (
+            joined.schema.length === names.length &&
+            names.every((n, i) => joined.schema[i]!.name === n)
+          ) {
+            return joined
+          }
+          return project(ensureMaterialized(joined), plan.columns)
+        }
+      }
       return project(ensureMaterialized(executeCpuNode(plan.input)), plan.columns)
     }
     case 'filter':
@@ -2119,10 +2356,21 @@ function executeCpuNode(plan: PlanNode): TableView {
     case 'sort':
       return sortTable(executeCpuNode(plan.input), plan.by)
     case 'limit': {
-      // Fuse sort + limit into top-k when possible
+      // Fuse filter → sort → limit into filtered top-k when possible
       if (plan.input.type === 'sort' && (plan.offset ?? 0) === 0) {
-        const sorted = sortTable(executeCpuNode(plan.input.input), plan.input.by, plan.n)
-        return sorted
+        if (plan.input.input.type === 'filter') {
+          const base = executeCpuNode(plan.input.input.input)
+          const fused = tryFusedFilterSortLimit(
+            base,
+            plan.input.input.predicate,
+            plan.input.by,
+            plan.n,
+          )
+          if (fused) return fused
+          const filtered = filterTable(base, plan.input.input.predicate)
+          return sortTable(filtered, plan.input.by, plan.n)
+        }
+        return sortTable(executeCpuNode(plan.input.input), plan.input.by, plan.n)
       }
       const t = ensureMaterialized(executeCpuNode(plan.input))
       const start = plan.offset ?? 0
@@ -2167,9 +2415,22 @@ function executeCpuNode(plan: PlanNode): TableView {
       return groupByTable(executeCpuNode(plan.input), plan.keys, plan.aggs)
     }
     case 'join':
-      return joinTables(executeCpuNode(plan.left), executeCpuNode(plan.right), plan.leftOn, plan.rightOn, plan.how)
+      return joinTables(
+        executeCpuNode(plan.left),
+        executeCpuNode(plan.right),
+        plan.leftOn,
+        plan.rightOn,
+        plan.how,
+        plan.lSuffix ?? '',
+        plan.rSuffix ?? '_right',
+        plan.validate,
+      )
     case 'fillNull':
-      return fillNullTable(executeCpuNode(plan.input), plan.value, plan.columns)
+      return fillNullTable(executeCpuNode(plan.input), plan.value, plan.columns, plan.values)
+    case 'ffill':
+      return ffillTable(executeCpuNode(plan.input), plan.columns)
+    case 'bfill':
+      return bfillTable(executeCpuNode(plan.input), plan.columns)
     case 'dropNull':
       return dropNullTable(executeCpuNode(plan.input), plan.columns)
     case 'melt':
@@ -2229,6 +2490,11 @@ function executeCpuNode(plan: PlanNode): TableView {
         plan.strategy,
       )
     case 'unique':
+      if (plan.input.type === 'filter') {
+        const base = executeCpuNode(plan.input.input)
+        const fused = tryFusedFilterUnique(base, plan.input.predicate, plan.columns, plan.keep)
+        if (fused) return fused
+      }
       return uniqueTable(executeCpuNode(plan.input), plan.columns, plan.keep)
     case 'valueCounts':
       return valueCounts(executeCpuNode(plan.input), plan.column, plan.normalize)
@@ -2237,6 +2503,103 @@ function executeCpuNode(plan: PlanNode): TableView {
     case 'corr':
       return corrTable(executeCpuNode(plan.input), plan.kind, plan.method, plan.columns)
   }
+}
+
+// --- Protocol v2: parallel sort/groupBy/unique interception (numeric, SAB-backed) ---
+
+type ArrKind = 'Float64Array' | 'Float32Array' | 'Int32Array' | 'Uint32Array' | 'Uint8Array'
+
+function dtypeToKind(dtype: DType): ArrKind | null {
+  switch (dtype) {
+    case 'f64': case 'datetime': return 'Float64Array'
+    case 'f32': return 'Float32Array'
+    case 'i32': return 'Int32Array'
+    case 'u32': return 'Uint32Array'
+    case 'bool': return 'Uint8Array'
+    default: return null
+  }
+}
+
+function copyToShared(src: ArrayLike<number>, kind: ArrKind): SharedArrayBuffer {
+  const buf = new SharedArrayBuffer(src.length * bytesPerElem(kind))
+  const view = viewTyped(kind, buf)
+  for (let i = 0; i < src.length; i++) view[i] = src[i]!
+  return buf
+}
+
+function bytesPerElem(kind: ArrKind): number {
+  switch (kind) {
+    case 'Float64Array': return 8
+    case 'Float32Array': return 4
+    case 'Int32Array': return 4
+    case 'Uint32Array': return 4
+    case 'Uint8Array': return 1
+  }
+}
+
+function viewTyped(kind: ArrKind, buf: SharedArrayBuffer): ArrayLike<number> & { [i: number]: number } {
+  switch (kind) {
+    case 'Float64Array': return new Float64Array(buf)
+    case 'Float32Array': return new Float32Array(buf)
+    case 'Int32Array': return new Int32Array(buf)
+    case 'Uint32Array': return new Uint32Array(buf)
+    case 'Uint8Array': return new Uint8Array(buf)
+  }
+}
+
+/** Try parallel sort when input is large and all keys are bare numeric (non-dict) columns. */
+async function tryParallelSort(plan: Extract<PlanNode, { type: 'sort' }>): Promise<TableView | null> {
+  const input = ensureMaterialized(executeCpuNode(plan.input))
+  const n = input.numRows
+  if (n < PARALLEL_SORT_MIN_ROWS) return null
+  const specs: Array<{ buffer: SharedArrayBuffer; kind: ArrKind; length: number; descending: boolean; nullsLast: boolean; nullBitmap: SharedArrayBuffer | null }> = []
+  for (const k of plan.by) {
+    if (k.expr.type !== 'col') return null
+    const col = getColumn(input, k.expr.name)
+    if (col.dictionary) return null
+    const kind = dtypeToKind(col.field.dtype)
+    if (!kind) return null
+    const data = col.data as ArrayLike<number>
+    if (!(data instanceof Float64Array || data instanceof Float32Array || data instanceof Int32Array || data instanceof Uint32Array || data instanceof Uint8Array)) return null
+    const nullsLast = k.nullsLast !== false
+    let nullBitmap: SharedArrayBuffer | null = null
+    if (col.nullBitmap) {
+      nullBitmap = new SharedArrayBuffer(n)
+      const nb = new Uint8Array(nullBitmap)
+      for (let i = 0; i < n; i++) nb[i] = isValid(col.nullBitmap, i) ? 1 : 0
+    }
+    specs.push({
+      buffer: copyToShared(data, kind),
+      kind, length: n,
+      descending: k.descending,
+      nullsLast,
+      nullBitmap,
+    })
+  }
+  const idx = await parallelSort(specs, n)
+  return gather(input, idx)
+}
+
+/** Try parallel unique when input is large and all subset columns are bare numeric (non-dict). */
+async function tryParallelUnique(plan: Extract<PlanNode, { type: 'unique' }>): Promise<TableView | null> {
+  const input = ensureMaterialized(executeCpuNode(plan.input))
+  const n = input.numRows
+  if (n < PARALLEL_UNIQUE_MIN_ROWS) return null
+  if (plan.keep !== 'first') return null
+  const colNames = plan.columns ?? input.schema.map((f) => f.name)
+  const cols: ArrayLike<number>[] = []
+  for (const name of colNames) {
+    const col = getColumn(input, name)
+    if (col.dictionary) return null
+    const kind = dtypeToKind(col.field.dtype)
+    if (!kind) return null
+    const data = col.data as ArrayLike<number>
+    if (!(data instanceof Float64Array || data instanceof Float32Array || data instanceof Int32Array || data instanceof Uint32Array || data instanceof Uint8Array)) return null
+    cols.push(data)
+  }
+  const idx = await parallelUnique(cols as unknown as (Float64Array | Float32Array | Int32Array | Uint32Array)[], n)
+  if (!idx) return null
+  return gather(input, idx)
 }
 
 export class CpuBackend implements Backend {
@@ -2249,14 +2612,26 @@ export class CpuBackend implements Backend {
 
   async execute(plan: PlanNode, ctx?: ExecContext): Promise<TableView> {
     const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
-    const done = (table: TableView, kernel?: string): TableView => {
+    const raw = plan
+    plan = optimizePlan(plan)
+    if (ctx && joinOrderChanged(raw, plan)) {
+      ctx.trace({
+        node: 'join',
+        backend: 'cpu',
+        kernel: 'optimized:joinReorder',
+        reason: 'inner join build/order changed by optimizePlan',
+      })
+    }
+    const done = (table: TableView, kernel?: string, reason?: string): TableView => {
       ctx?.trace({
         node: plan.type,
         backend: 'cpu',
         kernel,
         ms: (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0,
         rows: table.numRows,
-        reason: ctx.requested !== 'cpu' && ctx.requested !== 'auto' ? 'plan executed by the CPU engine' : undefined,
+        reason:
+          reason ??
+          (ctx.requested !== 'cpu' && ctx.requested !== 'auto' ? 'plan executed by the CPU engine' : undefined),
       })
       return table
     }
@@ -2265,8 +2640,9 @@ export class CpuBackend implements Backend {
       const input = executeCpuNode(plan.input)
       const dual = matchDualGtFilter(input, plan.predicate)
       if (dual) {
-        const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
-        return done(await parallelTakeTable(input, idx), input.numRows >= PARALLEL_MIN_ROWS ? 'workers:dualFilter' : isNativeKernelsLoaded() && input.numRows >= NATIVE_FILTER_MIN_ROWS ? 'native:dualFilter' : 'js:dualFilter')
+        await tryLoadNativeKernels()
+        const { indices, kernel } = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
+        return done(await parallelTakeTable(input, indices), kernel)
       }
       return done(ensureMaterialized(filterTable(input, plan.predicate)))
     }
@@ -2275,9 +2651,37 @@ export class CpuBackend implements Backend {
       const input = executeCpuNode(plan.input.input)
       const dual = matchDualGtFilter(input, plan.input.predicate)
       if (names && dual) {
-        const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
-        return done(project(await parallelTakeTable(input, idx, names), plan.columns), input.numRows >= PARALLEL_MIN_ROWS ? 'workers:dualFilter' : 'js:dualFilter')
+        await tryLoadNativeKernels()
+        const { indices, kernel } = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
+        return done(project(await parallelTakeTable(input, indices, names), plan.columns), kernel)
       }
+    }
+    // Protocol v2: parallel sort / unique for huge numeric inputs
+    if (plan.type === 'sort') {
+      const par = await tryParallelSort(plan)
+      if (par) return done(par, 'workers:sort', `parallel sort when rows≥${PARALLEL_SORT_MIN_ROWS}`)
+    }
+    if (plan.type === 'unique') {
+      const par = await tryParallelUnique(plan)
+      if (par) return done(par, 'workers:unique', `parallel unique when rows≥${PARALLEL_UNIQUE_MIN_ROWS}`)
+    }
+    // Join (or project→join keep): surface fast-join kernel + native threshold note
+    const joinRoot =
+      plan.type === 'join'
+        ? plan
+        : plan.type === 'project' && plan.input.type === 'join'
+          ? plan.input
+          : null
+    if (joinRoot) {
+      const table = ensureMaterialized(executeCpuNode(plan))
+      const info = lastFastJoinKernel
+      const rightEst = estimatePlanRows(joinRoot.right)
+      const reason =
+        info?.reason ??
+        (rightEst > 0
+          ? `build(right)≈${rightEst}; native probe when left≥${NATIVE_JOIN_MIN_ROWS}`
+          : undefined)
+      return done(table, info?.kernel ?? 'js:join', reason)
     }
     return done(executeCpu(plan))
   }

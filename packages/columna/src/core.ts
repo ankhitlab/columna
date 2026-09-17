@@ -3,4 +3,4 @@ export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinR
 export type { AggSpec } from '@columna/core'
 export type { ArrowLike, DType, Schema, TableView } from '@columna/arrow'
 export type { AggKind, EngineKind, JoinKind, PlanNode } from '@columna/runtime'
-export { Runtime, getDefaultRuntime, setDefaultRuntime, CpuBackend, executeCpu } from '@columna/runtime'
+export { Runtime, getDefaultRuntime, setDefaultRuntime, CpuBackend, executeCpu, optimizePlan } from '@columna/runtime'

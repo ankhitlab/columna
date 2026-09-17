@@ -7,6 +7,23 @@
 export declare function filterAnd2I32F64(a: Int32Array, b: Float64Array, opA: number, litA: number, opB: number, litB: number): Uint32Array
 /** Parallel dual filter: two Int32 columns. */
 export declare function filterAnd2I32I32(a: Int32Array, b: Int32Array, opA: number, litA: number, opB: number, litB: number): Uint32Array
+/** Parallel dual filter: two Float64 columns with arbitrary cmp ops. */
+export declare function filterAnd2F64F64(a: Float64Array, b: Float64Array, opA: number, litA: number, opB: number, litB: number): Uint32Array
+/**
+ * Argsort f64 values (nulls encoded as NaN are sorted last when `nulls_last`).
+ * Returns row indices in sorted order. Stable-ish via index tie-break.
+ */
+export declare function argsortF64(values: Float64Array, descending: boolean, nullsLast: boolean): Uint32Array
+/** Argsort i32 values. `null_bitmap` optional packed validity (1 bit per row); when absent all valid. */
+export declare function argsortI32(values: Int32Array, descending: boolean, nullsLast: boolean, nullBitmap?: Uint8Array | undefined | null): Uint32Array
+/** Parallel dense groupby min/max for f64 columns (same layout as groupby_sums_f64). */
+export interface GroupMinMaxOut {
+  mins: Float64Array
+  maxs: Float64Array
+  counts: Float64Array
+  used: Uint8Array
+}
+export declare function groupbyMinmaxF64(codes: Uint32Array, card: number, cols: Array<Float64Array>): GroupMinMaxOut
 /** Parallel gather of f64 values by indices. */
 export declare function gatherF64(src: Float64Array, indices: Uint32Array): Float64Array
 /** Parallel gather of i32 values by indices. */
@@ -15,6 +32,25 @@ export declare function gatherI32(src: Int32Array, indices: Uint32Array): Int32A
 export declare function joinProbeDenseI32(leftKeys: Int32Array, dense: Int32Array, rMin: number): Int32Array
 /** Semi/anti filter via dense probe. `want_hit=true` → semi, false → anti. */
 export declare function joinSemiDenseI32(leftKeys: Int32Array, dense: Int32Array, rMin: number, wantHit: boolean): Uint32Array
+/**
+ * Generic multi-column AND filter on f64 columns.
+ * `ops`: 0=eq 1=neq 2=gt 3=gte 4=lt 5=lte. `lits`: literal per column.
+ * Returns matching row indices.
+ */
+export declare function filterF64(cols: Array<Float64Array>, ops: Array<number>, lits: Array<number>): Uint32Array
+/**
+ * Lexicographic multi-key argsort on f64 columns (NaN = null, sorted per `nulls_last[k]`).
+ * `descending` / `nulls_last` must each have length == keys.len(). Stable via index tie-break.
+ */
+export declare function argsortMultiF64(keys: Array<Float64Array>, descending: Array<boolean>, nullsLast: Array<boolean>): Uint32Array
+/** Parallel unique (first-seen) over f64 columns. Returns first row index of each distinct tuple. */
+export declare function uniqueF64(cols: Array<Float64Array>): Uint32Array
+/**
+ * Hash-join build side: construct a dense probe table from right int32 keys.
+ * `dense[k - r_min]` = first right row index with that key, or -1 when the slot is empty.
+ * Pairs with `join_probe_dense_i32` / `join_semi_dense_i32`.
+ */
+export declare function joinBuildDenseI32(rightKeys: Int32Array, rMin: number): Int32Array
 export interface GroupSumsOut {
   sums: Float64Array
   counts: Float64Array

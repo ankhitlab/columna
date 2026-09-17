@@ -408,15 +408,108 @@ export async function writeParquetLikeBytes(table: TableView, path?: string): Pr
   return bytes
 }
 
+type ParquetBasicType = 'BOOLEAN' | 'INT32' | 'INT64' | 'FLOAT' | 'DOUBLE' | 'STRING' | 'TIMESTAMP'
+
+/** Expand a columna column into hyparquet-writer `columnData` (nulls as JS null). */
+export function tableToParquetColumnData(
+  table: TableView,
+): Array<{ name: string; data: Array<number | string | boolean | null>; type: ParquetBasicType; nullable: boolean }> {
+  const n = table.numRows
+  return table.columns.map((c) => {
+    const dtype = c.field.dtype
+    const nullable = Boolean(c.nullBitmap) || c.field.nullable
+    let type: ParquetBasicType
+    const data: Array<number | string | boolean | null> = new Array(n)
+    switch (dtype) {
+      case 'bool': {
+        type = 'BOOLEAN'
+        const src = c.data as Uint8Array
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : Boolean(src[i])
+        }
+        break
+      }
+      case 'i32': {
+        type = 'INT32'
+        const src = c.data as Int32Array
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+      case 'u32': {
+        // Parquet INT32 is signed; values above 2^31-1 widen to INT64.
+        let needsI64 = false
+        const src = c.data as Uint32Array
+        for (let i = 0; i < n; i++) {
+          if (isValid(c.nullBitmap, i) && src[i]! > 0x7fffffff) {
+            needsI64 = true
+            break
+          }
+        }
+        type = needsI64 ? 'INT64' : 'INT32'
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+      case 'f32': {
+        type = 'FLOAT'
+        const src = c.data as Float32Array
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+      case 'f64': {
+        type = 'DOUBLE'
+        const src = c.data as Float64Array
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+      case 'datetime': {
+        type = 'TIMESTAMP'
+        const src = c.data as Float64Array
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+      case 'category': {
+        type = 'STRING'
+        const codes = c.data as Uint32Array
+        const dict = c.dictionary ?? []
+        for (let i = 0; i < n; i++) {
+          if (!isValid(c.nullBitmap, i)) data[i] = null
+          else data[i] = dict[codes[i]!] ?? null
+        }
+        break
+      }
+      case 'utf8':
+      default: {
+        type = 'STRING'
+        const src = c.data as string[]
+        for (let i = 0; i < n; i++) {
+          data[i] = !isValid(c.nullBitmap, i) ? null : src[i]!
+        }
+        break
+      }
+    }
+    return { name: c.field.name, data, type, nullable }
+  })
+}
+
 /**
- * @deprecated This never wrote Apache Parquet — it wrote JSON (`columna-parquet-like-v1`).
- * Use {@link writeParquetLikeBytes} explicitly. A real Parquet writer is not implemented yet.
+ * Write Apache Parquet (via hyparquet-writer). Round-trips with {@link DataFrame.readParquet}.
+ * Default codec is SNAPPY.
  */
 export async function writeParquetBytes(table: TableView, path?: string): Promise<Uint8Array> {
-  throw new Error(
-    'DataFrame.writeParquet() does not write Apache Parquet files. ' +
-      'It previously wrote a JSON "columna-parquet-like-v1" payload which cannot be read by ' +
-      'DataFrame.readParquet() (hyparquet). Use writeParquetLike() / writeParquetLikeBytes() for that format, ' +
-      'or write CSV / JSON until a real Parquet writer ships.',
-  )
+  const { parquetWriteBuffer } = await import('hyparquet-writer')
+  const columnData = tableToParquetColumnData(table)
+  const ab = parquetWriteBuffer({ columnData, codec: 'SNAPPY' })
+  const bytes = new Uint8Array(ab)
+  if (path) await writeNodeFile(path, bytes)
+  return bytes
 }

@@ -115,6 +115,238 @@ pub fn filter_and2_i32_i32(
   Uint32Array::new(out)
 }
 
+/// Parallel dual filter: two Float64 columns with arbitrary cmp ops.
+#[napi]
+pub fn filter_and2_f64_f64(
+  a: Float64Array,
+  b: Float64Array,
+  op_a: u32,
+  lit_a: f64,
+  op_b: u32,
+  lit_b: f64,
+) -> Uint32Array {
+  let n = a.len().min(b.len());
+  let av = a.as_ref();
+  let bv = b.as_ref();
+  let chunk = chunk_size(n);
+
+  let parts: Vec<Vec<u32>> = av[..n]
+    .par_chunks(chunk)
+    .enumerate()
+    .map(|(ci, a_chunk)| {
+      let base = ci * chunk;
+      let b_chunk = &bv[base..base + a_chunk.len()];
+      let mut local = Vec::with_capacity(a_chunk.len() / 2);
+      for (j, (&va, &vb)) in a_chunk.iter().zip(b_chunk.iter()).enumerate() {
+        if cmp_f64(op_a, va, lit_a) && cmp_f64(op_b, vb, lit_b) {
+          local.push((base + j) as u32);
+        }
+      }
+      local
+    })
+    .collect();
+
+  let total: usize = parts.iter().map(|p| p.len()).sum();
+  let mut out = Vec::with_capacity(total);
+  for p in parts {
+    out.extend_from_slice(&p);
+  }
+  Uint32Array::new(out)
+}
+
+/// Argsort f64 values (nulls encoded as NaN are sorted last when `nulls_last`).
+/// Returns row indices in sorted order. Stable-ish via index tie-break.
+#[napi]
+pub fn argsort_f64(values: Float64Array, descending: bool, nulls_last: bool) -> Uint32Array {
+  let n = values.len();
+  let data = values.as_ref();
+  let mut idx: Vec<u32> = (0..n as u32).collect();
+  idx.par_sort_by(|&ia, &ib| {
+    let a = data[ia as usize];
+    let b = data[ib as usize];
+    let a_nan = a.is_nan();
+    let b_nan = b.is_nan();
+    if a_nan || b_nan {
+      return match (a_nan, b_nan) {
+        (true, true) => ia.cmp(&ib),
+        (true, false) => {
+          if nulls_last {
+            std::cmp::Ordering::Greater
+          } else {
+            std::cmp::Ordering::Less
+          }
+        }
+        (false, true) => {
+          if nulls_last {
+            std::cmp::Ordering::Less
+          } else {
+            std::cmp::Ordering::Greater
+          }
+        }
+        _ => unreachable!(),
+      };
+    }
+    let ord = a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+    let ord = if descending { ord.reverse() } else { ord };
+    if ord == std::cmp::Ordering::Equal {
+      ia.cmp(&ib)
+    } else {
+      ord
+    }
+  });
+  Uint32Array::new(idx)
+}
+
+/// Argsort i32 values. `null_bitmap` optional packed validity (1 bit per row); when absent all valid.
+#[napi]
+pub fn argsort_i32(
+  values: Int32Array,
+  descending: bool,
+  nulls_last: bool,
+  null_bitmap: Option<Uint8Array>,
+) -> Uint32Array {
+  let n = values.len();
+  let data = values.as_ref();
+  let bm = null_bitmap.as_ref().map(|b| b.as_ref());
+  let is_null = |i: usize| -> bool {
+    match bm {
+      Some(bits) => {
+        let byte = i / 8;
+        if byte >= bits.len() {
+          return true;
+        }
+        (bits[byte] & (1 << (i % 8))) == 0
+      }
+      None => false,
+    }
+  };
+  let mut idx: Vec<u32> = (0..n as u32).collect();
+  idx.par_sort_by(|&ia, &ib| {
+    let a_null = is_null(ia as usize);
+    let b_null = is_null(ib as usize);
+    if a_null || b_null {
+      return match (a_null, b_null) {
+        (true, true) => ia.cmp(&ib),
+        (true, false) => {
+          if nulls_last {
+            std::cmp::Ordering::Greater
+          } else {
+            std::cmp::Ordering::Less
+          }
+        }
+        (false, true) => {
+          if nulls_last {
+            std::cmp::Ordering::Less
+          } else {
+            std::cmp::Ordering::Greater
+          }
+        }
+        _ => unreachable!(),
+      };
+    }
+    let a = data[ia as usize];
+    let b = data[ib as usize];
+    let ord = a.cmp(&b);
+    let ord = if descending { ord.reverse() } else { ord };
+    if ord == std::cmp::Ordering::Equal {
+      ia.cmp(&ib)
+    } else {
+      ord
+    }
+  });
+  Uint32Array::new(idx)
+}
+
+/// Parallel dense groupby min/max for f64 columns (same layout as groupby_sums_f64).
+#[napi(object)]
+pub struct GroupMinMaxOut {
+  pub mins: Float64Array,
+  pub maxs: Float64Array,
+  pub counts: Float64Array,
+  pub used: Uint8Array,
+}
+
+#[napi]
+pub fn groupby_minmax_f64(codes: Uint32Array, card: u32, cols: Vec<Float64Array>) -> Result<GroupMinMaxOut> {
+  let card = card as usize;
+  if card == 0 {
+    return Ok(GroupMinMaxOut {
+      mins: Float64Array::new(vec![]),
+      maxs: Float64Array::new(vec![]),
+      counts: Float64Array::new(vec![]),
+      used: Uint8Array::new(vec![]),
+    });
+  }
+  let n = codes.len();
+  let ncols = cols.len();
+  let code_ref = codes.as_ref();
+  let col_refs: Vec<&[f64]> = cols.iter().map(|c| c.as_ref()).collect();
+  for c in &col_refs {
+    if c.len() < n {
+      return Err(Error::from_reason("groupby_minmax_f64: column shorter than codes"));
+    }
+  }
+
+  let chunk = chunk_size(n);
+  let (mins, maxs, counts) = code_ref[..n]
+    .par_chunks(chunk)
+    .enumerate()
+    .map(|(ci, code_chunk)| {
+      let base = ci * chunk;
+      let mut mins = vec![f64::INFINITY; ncols * card];
+      let mut maxs = vec![f64::NEG_INFINITY; ncols * card];
+      let mut counts = vec![0f64; card];
+      for (j, &code) in code_chunk.iter().enumerate() {
+        let c = code as usize;
+        if c >= card {
+          continue;
+        }
+        counts[c] += 1.0;
+        let row = base + j;
+        for (ci, col) in col_refs.iter().enumerate() {
+          let v = col[row];
+          let ix = ci * card + c;
+          if v < mins[ix] {
+            mins[ix] = v;
+          }
+          if v > maxs[ix] {
+            maxs[ix] = v;
+          }
+        }
+      }
+      (mins, maxs, counts)
+    })
+    .reduce(
+      || (
+        vec![f64::INFINITY; ncols * card],
+        vec![f64::NEG_INFINITY; ncols * card],
+        vec![0f64; card],
+      ),
+      |mut a, b| {
+        for i in 0..a.0.len() {
+          if b.0[i] < a.0[i] {
+            a.0[i] = b.0[i];
+          }
+          if b.1[i] > a.1[i] {
+            a.1[i] = b.1[i];
+          }
+        }
+        for i in 0..card {
+          a.2[i] += b.2[i];
+        }
+        a
+      },
+    );
+
+  let used: Vec<u8> = counts.iter().map(|&c| if c > 0.0 { 1 } else { 0 }).collect();
+  Ok(GroupMinMaxOut {
+    mins: Float64Array::new(mins),
+    maxs: Float64Array::new(maxs),
+    counts: Float64Array::new(counts),
+    used: Uint8Array::new(used),
+  })
+}
+
 /// Parallel gather of f64 values by indices.
 #[napi]
 pub fn gather_f64(src: Float64Array, indices: Uint32Array) -> Float64Array {
@@ -193,6 +425,199 @@ pub fn join_semi_dense_i32(
     out.extend_from_slice(&p);
   }
   Uint32Array::new(out)
+}
+
+/// Generic multi-column AND filter on f64 columns.
+/// `ops`: 0=eq 1=neq 2=gt 3=gte 4=lt 5=lte. `lits`: literal per column.
+/// Returns matching row indices.
+#[napi]
+pub fn filter_f64(cols: Vec<Float64Array>, ops: Vec<u32>, lits: Vec<f64>) -> Result<Uint32Array> {
+  let ncols = cols.len();
+  if ncols == 0 {
+    return Ok(Uint32Array::new(vec![]));
+  }
+  if ops.len() != ncols || lits.len() != ncols {
+    return Err(Error::from_reason("filter_f64: ops/lits length mismatch"));
+  }
+  let n = cols[0].len();
+  let col_refs: Vec<&[f64]> = cols.iter().map(|c| c.as_ref()).collect();
+  for c in &col_refs {
+    if c.len() < n {
+      return Err(Error::from_reason("filter_f64: column shorter than first"));
+    }
+  }
+  let chunk = chunk_size(n);
+
+  let parts: Vec<Vec<u32>> = (0..n)
+    .into_par_iter()
+    .chunks(chunk)
+    .map(|rows| {
+      let mut local = Vec::with_capacity(rows.len() / 2);
+      for i in rows {
+        let row = i;
+        let mut hit = true;
+        for c in 0..ncols {
+          if !cmp_f64(ops[c], col_refs[c][row], lits[c]) {
+            hit = false;
+            break;
+          }
+        }
+        if hit {
+          local.push(row as u32);
+        }
+      }
+      local
+    })
+    .collect();
+
+  let total: usize = parts.iter().map(|p| p.len()).sum();
+  let mut out = Vec::with_capacity(total);
+  for p in parts {
+    out.extend_from_slice(&p);
+  }
+  Ok(Uint32Array::new(out))
+}
+
+/// Lexicographic multi-key argsort on f64 columns (NaN = null, sorted per `nulls_last[k]`).
+/// `descending` / `nulls_last` must each have length == keys.len(). Stable via index tie-break.
+#[napi]
+pub fn argsort_multi_f64(
+  keys: Vec<Float64Array>,
+  descending: Vec<bool>,
+  nulls_last: Vec<bool>,
+) -> Result<Uint32Array> {
+  let nkeys = keys.len();
+  if nkeys == 0 {
+    return Ok(Uint32Array::new(vec![]));
+  }
+  if descending.len() != nkeys || nulls_last.len() != nkeys {
+    return Err(Error::from_reason("argsort_multi_f64: flag length mismatch"));
+  }
+  let n = keys[0].len();
+  let key_refs: Vec<&[f64]> = keys.iter().map(|c| c.as_ref()).collect();
+  for c in &key_refs {
+    if c.len() < n {
+      return Err(Error::from_reason("argsort_multi_f64: key shorter than first"));
+    }
+  }
+  let mut idx: Vec<u32> = (0..n as u32).collect();
+  idx.par_sort_by(|&ia, &ib| {
+    for k in 0..nkeys {
+      let a = key_refs[k][ia as usize];
+      let b = key_refs[k][ib as usize];
+      let a_nan = a.is_nan();
+      let b_nan = b.is_nan();
+      if a_nan || b_nan {
+        return match (a_nan, b_nan) {
+          (true, true) => ia.cmp(&ib),
+          (true, false) => {
+            if nulls_last[k] {
+              std::cmp::Ordering::Greater
+            } else {
+              std::cmp::Ordering::Less
+            }
+          }
+          (false, true) => {
+            if nulls_last[k] {
+              std::cmp::Ordering::Less
+            } else {
+              std::cmp::Ordering::Greater
+            }
+          }
+          _ => unreachable!(),
+        };
+      }
+      let ord = a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+      let ord = if descending[k] { ord.reverse() } else { ord };
+      if ord != std::cmp::Ordering::Equal {
+        return ord;
+      }
+    }
+    ia.cmp(&ib)
+  });
+  Ok(Uint32Array::new(idx))
+}
+
+/// Parallel unique (first-seen) over f64 columns. Returns first row index of each distinct tuple.
+#[napi]
+pub fn unique_f64(cols: Vec<Float64Array>) -> Result<Uint32Array> {
+  let ncols = cols.len();
+  if ncols == 0 {
+    return Ok(Uint32Array::new(vec![]));
+  }
+  let n = cols[0].len();
+  let col_refs: Vec<&[f64]> = cols.iter().map(|c| c.as_ref()).collect();
+  for c in &col_refs {
+    if c.len() < n {
+      return Err(Error::from_reason("unique_f64: column shorter than first"));
+    }
+  }
+  let chunk = chunk_size(n);
+
+  // Each chunk builds its own first-seen index set; main merges keeping global first-seen.
+  let parts: Vec<Vec<u32>> = (0..n)
+    .into_par_iter()
+    .chunks(chunk)
+    .map(|rows| {
+      let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+      let mut local = Vec::new();
+      let mut keybuf = vec![0u8; ncols * 8];
+      for i in rows {
+        for c in 0..ncols {
+          keybuf[c * 8..c * 8 + 8].copy_from_slice(&col_refs[c][i].to_le_bytes());
+        }
+        if seen.insert(keybuf.clone()) {
+          local.push(i as u32);
+        }
+      }
+      local
+    })
+    .collect();
+
+  // Merge: keep first-seen across chunks (chunks are in row order, so earlier chunks win).
+  let mut global: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+  let mut out = Vec::new();
+  let mut keybuf = vec![0u8; ncols * 8];
+  for part in parts {
+    for &i in part.iter() {
+      for c in 0..ncols {
+        keybuf[c * 8..c * 8 + 8].copy_from_slice(&col_refs[c][i as usize].to_le_bytes());
+      }
+      if global.insert(keybuf.clone()) {
+        out.push(i);
+      }
+    }
+  }
+  Ok(Uint32Array::new(out))
+}
+
+/// Hash-join build side: construct a dense probe table from right int32 keys.
+/// `dense[k - r_min]` = first right row index with that key, or -1 when the slot is empty.
+/// Pairs with `join_probe_dense_i32` / `join_semi_dense_i32`.
+#[napi]
+pub fn join_build_dense_i32(right_keys: Int32Array, r_min: i32) -> Result<Int32Array> {
+  let keys = right_keys.as_ref();
+  let n = keys.len();
+  if n == 0 {
+    return Ok(Int32Array::new(vec![]));
+  }
+  let mut r_max = r_min;
+  for &k in keys.iter() {
+    if k > r_max {
+      r_max = k;
+    }
+  }
+  if r_max < r_min {
+    return Err(Error::from_reason("join_build_dense_i32: r_max < r_min"));
+  }
+  let span = (r_max - r_min + 1) as usize;
+  let mut dense = vec![-1i32; span];
+  for (i, &k) in keys.iter().enumerate() {
+    let off = (k - r_min) as usize;
+    // Last-wins to match the JS dense build semantics (one match per key).
+    dense[off] = i as i32;
+  }
+  Ok(Int32Array::new(dense))
 }
 
 #[napi(object)]

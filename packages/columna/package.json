@@ -68,6 +68,7 @@
   "dependencies": {
     "hyparquet": "^1.30.0",
     "hyparquet-compressors": "^1.1.1",
+    "hyparquet-writer": "^0.16.9",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "optionalDependencies": {

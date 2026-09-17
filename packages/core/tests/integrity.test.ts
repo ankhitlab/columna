@@ -80,9 +80,21 @@ describe('data integrity', () => {
     expect(cat.toBlob('csv', { escapeFormulas: true }).size).toBeGreaterThan(cat.toBlob('csv').size)
   })
 
-  it('writeParquet refuses the false Apache Parquet claim', async () => {
-    const df = DataFrame.fromRows([{ a: 1 }])
-    await expect(df.writeParquet()).rejects.toThrow(/does not write Apache Parquet/)
+  it('writeParquet round-trips with readParquet', async () => {
+    const df = DataFrame.fromRows([
+      { a: 1, b: 'x', c: true, d: null as number | null },
+      { a: 2, b: 'y', c: false, d: 4.5 },
+    ])
+    const bytes = await df.writeParquet()
+    expect(bytes.byteLength).toBeGreaterThan(8)
+    // PAR1 magic
+    expect(String.fromCharCode(bytes[0]!, bytes[1]!, bytes[2]!, bytes[3]!)).toBe('PAR1')
+    const back = await DataFrame.readParquet(bytes)
+    expect(back.shape[0]).toBe(2)
+    const rows = back.toArray().sort((r, s) => Number(r.a) - Number(s.a))
+    expect(rows[0]).toMatchObject({ a: 1, b: 'x', c: true })
+    expect(rows[0]?.d ?? null).toBeNull()
+    expect(rows[1]).toMatchObject({ a: 2, b: 'y', c: false, d: 4.5 })
   })
 
   it('writeParquetLike round-trips with readParquetLike payload shape', async () => {

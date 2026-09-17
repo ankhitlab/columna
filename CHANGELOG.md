@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Analyst DX: sync `DataFrame.head` / `tail` (materialized peeks), `show` / `print` (markdown to console).
+- `ffill` / `bfill` plan nodes; `fillNull({ col: value })` per-column map overload.
+- `GroupBy.count` / `sum` / `mean` / `min` / `max` / `std` / `var` / `nunique` / `median` shortcuts; `agg({ col: ['sum','mean'] })` expands to `col_sum` / `col_mean`.
+- Join `suffix` / `lSuffix` / `rSuffix`; `rightJoin` / `outerJoin` / `fullJoin`; `validate: '1:1' | '1:m' | 'm:1'`; right/outer shared-key coalesce.
+- Sort `nullsLast` per key (default true); `col('x').asc({ nullsLast: false })`.
+- Sync `DataFrame.describe()`; filter aliases `where` / `isNull` / `notNull` / `between`; `exclude` / `selectNumeric` / `selectDtypes`; `assign`; `rename(fn)`.
+- `DataFrame.col` / `nunique()`; Series `fillNull` / `ffill` / `bfill` / `valueCounts` / `nunique`.
+- Real Apache Parquet write: `writeParquet` / `writeParquetBytes` via `hyparquet-writer` (round-trips with `readParquet`); `writeParquetLike` remains the JSON container.
+- Plan fusions: `filter → unique`, `filter → sort → limit`; projection through join with execute-time column keep.
+- Rule-based `optimizePlan` (merge filters; push filter past project / under withColumn·drop·rename·sort / into join sides; limit under project; fold project/drop/rename; groupBy input prune; sample/NDV `estimatePlanRows`; inner-join greedy graph reorder + build-side swap; left/semi/anti never swap); runs on `collect` / `explain` / `executeCpu` before backend dispatch. `explain` shows `rows≈`; `collectWithReport` traces `optimized:joinReorder` and native join threshold notes.
+- Native Rayon: single-key `argsort` (f64/i32), dual-cmp filter beyond gt∧gt (incl. f64∧f64), dense groupBy min/max.
+- **Multi-threaded engine.** Generalized `engine-worker` protocol v2 (filter, sort, groupBy, unique, gather, dual-gt) shared by Node `worker_threads` and browser Web Workers over `SharedArrayBuffer` chunks; reusable worker pool with `parallelFilter` / `parallelSort` / `parallelGroupBy` / `parallelUnique` / `parallelGather` dispatch and per-op thresholds (filter / dual-gt ≥ 1M when native is absent, sort/groupBy/unique ≥ 5M, gather ≥ 2M). Native Rayon is preferred over workers when both are available. `CpuBackend.execute` routes large sort / unique / filter / gather through workers; every parallel path falls back to a single-threaded kernel below its threshold or when workers / SAB are unavailable. Native Rayon gaps filled: multi-key `argsortMultiF64`, parallel `uniqueF64`, generic multi-column `filterF64`, hash-join build `joinBuildDenseI32`. `collectWithReport` records the kernel that ran (`workers:sort`, `native:dualFilter`, `native:joinBuildDenseI32`, `js:unique`, …).
+- `columna/advanced` DataFrame wrappers: `propTest`, `adfTest`, `kpssTest`, `ridge`, `lasso`, `ancova`, `ksTwoSample`; `formatReport(result, 'markdown' | 'html')` for t-test / ANOVA / OLS.
+
+### Changed
+
+- Positioning / Engines docs: native gather threshold 50k (not 250k); CSV compare-js ~280 ms with native; Parquet write and fused plan list updated; rule-based rewrite listed under offers (not full CBO under gaps); "multi-threaded engine" moved from a gap to an offer (threads accelerate individual heavy ops; not a morsel-driven parallel runtime).
 ## [0.2.1] - 2026-09-17
 
 Republish of the 0.2.0 contents after the initial `0.2.0` tarball stalled in the npm registry staging queue.

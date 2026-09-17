@@ -56,7 +56,7 @@ describe('persist LRU cache', () => {
 
   it('hashPlan stays cheap on large scan tables', () => {
     const df = DataFrame.fromRows(Array.from({ length: 100_000 }, (_, i) => ({ a: i, b: i % 7 })))
-    const plan = df.head(1).plan
+    const plan = df.lazy().head(1).plan
     const t0 = performance.now()
     const key = hashPlan(plan)
     const ms = performance.now() - t0

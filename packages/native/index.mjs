@@ -12,6 +12,10 @@ try {
 
 export const filterAnd2I32F64 = native.filterAnd2I32F64
 export const filterAnd2I32I32 = native.filterAnd2I32I32
+export const filterAnd2F64F64 = native.filterAnd2F64F64
+export const argsortF64 = native.argsortF64
+export const argsortI32 = native.argsortI32
+export const groupbyMinmaxF64 = native.groupbyMinmaxF64
 export const gatherF64 = native.gatherF64
 export const gatherI32 = native.gatherI32
 export const joinProbeDenseI32 = native.joinProbeDenseI32

@@ -1,4 +1,5 @@
 import type { DType, TableView } from '@columna/arrow'
+import { estimatePlanRows } from './stats.js'
 
 export type EngineKind = 'webgpu' | 'wasm' | 'cpu' | 'auto'
 
@@ -143,7 +144,11 @@ export type PlanNode =
   | { type: 'scan'; table: TableView }
   | { type: 'project'; input: PlanNode; columns: Array<string | ExprNode> }
   | { type: 'filter'; input: PlanNode; predicate: ExprNode }
-  | { type: 'sort'; input: PlanNode; by: Array<{ expr: ExprNode; descending: boolean }> }
+  | {
+      type: 'sort'
+      input: PlanNode
+      by: Array<{ expr: ExprNode; descending: boolean; nullsLast?: boolean }>
+    }
   | { type: 'limit'; input: PlanNode; n: number; offset?: number }
   | { type: 'withColumn'; input: PlanNode; name: string; expr: ExprNode }
   | { type: 'withColumns'; input: PlanNode; columns: Array<{ name: string; expr: ExprNode }> }
@@ -162,6 +167,12 @@ export type PlanNode =
       leftOn: string[]
       rightOn: string[]
       how: JoinKind
+      /** Applied to colliding left non-key columns; empty/omitted keeps the left name (pandas-like). */
+      lSuffix?: string
+      /** Applied to colliding right non-key columns; default `_right`. */
+      rSuffix?: string
+      /** Assert join-key uniqueness before joining (pandas-style). */
+      validate?: '1:1' | '1:m' | 'm:1'
     }
   | {
       type: 'asofJoin'
@@ -171,7 +182,16 @@ export type PlanNode =
       rightOn: string
       strategy: 'backward' | 'forward' | 'nearest'
     }
-  | { type: 'fillNull'; input: PlanNode; columns?: string[]; value: number | string | boolean }
+  | {
+      type: 'fillNull'
+      input: PlanNode
+      columns?: string[]
+      value?: number | string | boolean
+      /** Per-column fill values; when set, `value` / `columns` are ignored. */
+      values?: Record<string, number | string | boolean>
+    }
+  | { type: 'ffill'; input: PlanNode; columns?: string[] }
+  | { type: 'bfill'; input: PlanNode; columns?: string[] }
   | { type: 'dropNull'; input: PlanNode; columns?: string[] }
   | {
       type: 'melt'
@@ -350,6 +370,8 @@ export function collectLeafTables(plan: PlanNode): TableView[] {
     case 'rename':
     case 'groupBy':
     case 'fillNull':
+    case 'ffill':
+    case 'bfill':
     case 'dropNull':
     case 'melt':
     case 'pivot':
@@ -399,28 +421,30 @@ export function planUsesOnlyGpuFriendly(plan: PlanNode): boolean {
 
 export function explainPlan(plan: PlanNode, indent = 0): string {
   const pad = '  '.repeat(indent)
+  const rowsApprox =
+    plan.type === 'scan' ? '' : ` rows≈${estimatePlanRows(plan)}`
   switch (plan.type) {
     case 'scan':
       return `${pad}Scan(rows=${plan.table.numRows}, cols=${plan.table.schema.map((f) => f.name).join(',')})`
     case 'join':
-      return `${pad}Join(${plan.how})\n${explainPlan(plan.left, indent + 1)}\n${explainPlan(plan.right, indent + 1)}`
+      return `${pad}Join(${plan.how})${rowsApprox}\n${explainPlan(plan.left, indent + 1)}\n${explainPlan(plan.right, indent + 1)}`
     case 'asofJoin':
-      return `${pad}AsofJoin(${plan.strategy})\n${explainPlan(plan.left, indent + 1)}\n${explainPlan(plan.right, indent + 1)}`
+      return `${pad}AsofJoin(${plan.strategy})${rowsApprox}\n${explainPlan(plan.left, indent + 1)}\n${explainPlan(plan.right, indent + 1)}`
     case 'concat':
-      return `${pad}Concat(${plan.how})\n${plan.frames.map((f) => explainPlan(f, indent + 1)).join('\n')}`
+      return `${pad}Concat(${plan.how})${rowsApprox}\n${plan.frames.map((f) => explainPlan(f, indent + 1)).join('\n')}`
     case 'groupBy':
-      return `${pad}GroupBy(keys=${plan.keys.join(',')})\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}GroupBy(keys=${plan.keys.join(',')})${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     case 'project':
-      return `${pad}Project\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}Project${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     case 'filter':
-      return `${pad}Filter\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}Filter${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     case 'sort':
-      return `${pad}Sort\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}Sort${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     case 'limit':
-      return `${pad}Limit(${plan.n})\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}Limit(${plan.n})${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     case 'withColumns':
-      return `${pad}WithColumns(${plan.columns.map((c) => c.name).join(',')})\n${explainPlan(plan.input, indent + 1)}`
+      return `${pad}WithColumns(${plan.columns.map((c) => c.name).join(',')})${rowsApprox}\n${explainPlan(plan.input, indent + 1)}`
     default:
-      return `${pad}${plan.type}\n${'input' in plan ? explainPlan((plan as { input: PlanNode }).input, indent + 1) : ''}`
+      return `${pad}${plan.type}${rowsApprox}\n${'input' in plan ? explainPlan((plan as { input: PlanNode }).input, indent + 1) : ''}`
   }
 }

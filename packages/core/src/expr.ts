@@ -253,11 +253,11 @@ export class Expr<T = any, N extends string = string> {
     })
   }
 
-  asc(): { expr: Expr<T, N>; descending: boolean } {
-    return { expr: this, descending: false }
+  asc(options?: { nullsLast?: boolean }): { expr: Expr<T, N>; descending: boolean; nullsLast?: boolean } {
+    return { expr: this, descending: false, nullsLast: options?.nullsLast }
   }
-  desc(): { expr: Expr<T, N>; descending: boolean } {
-    return { expr: this, descending: true }
+  desc(options?: { nullsLast?: boolean }): { expr: Expr<T, N>; descending: boolean; nullsLast?: boolean } {
+    return { expr: this, descending: true, nullsLast: options?.nullsLast }
   }
 }
 

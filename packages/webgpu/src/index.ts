@@ -237,6 +237,8 @@ export function planHasGpuKernel(plan: PlanNode): boolean {
     case 'rename':
     case 'groupBy':
     case 'fillNull':
+    case 'ffill':
+    case 'bfill':
     case 'dropNull':
     case 'melt':
     case 'pivot':

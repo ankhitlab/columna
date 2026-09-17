@@ -1,32 +1,40 @@
 /**
- * Node-only parallel kernels via a reusable worker_threads pool + SharedArrayBuffer.
- * Imported dynamically from parallel.ts so browser bundles never pull node:*.
+ * Browser-only parallel kernels via a reusable Web Worker pool + SharedArrayBuffer.
+ * Imported dynamically from parallel.ts so Node bundles never pull DOM APIs.
+ * Mirrors parallel-node.ts dispatch but uses `new Worker(url)` and `self`-style
+ * messaging. Requires cross-origin isolation (COOP/COEP) for SharedArrayBuffer;
+ * falls back to single-threaded sync when SAB or workers are unavailable.
  */
-import { cpus } from 'node:os'
-import { Worker } from 'node:worker_threads'
-import { fileURLToPath } from 'node:url'
 import { dualGtIndices } from './fast.js'
+import {
+  type EngineJob,
+  type ArrKind,
+  type CmpOp,
+  type SortKeySpec,
+  type AggSpec,
+} from './engine-jobs.js'
 
 type NumArr = Float64Array | Float32Array | Int32Array | Uint32Array | Uint8Array
-type ArrKind = 'Float64Array' | 'Float32Array' | 'Int32Array' | 'Uint32Array' | 'Uint8Array'
 
-type Pending = {
-  resolve: (v: unknown) => void
-  reject: (e: Error) => void
-}
-
-type Pool = {
-  workers: Worker[]
-  rr: number
-  pending: Map<number, Pending>
-  nextId: number
-}
+type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void }
+type Pool = { workers: Worker[]; rr: number; pending: Map<number, Pending>; nextId: number }
 
 let pool: Pool | null = null
 
+function sabAvailable(): boolean {
+  try {
+    // eslint-disable-next-line no-new
+    new SharedArrayBuffer(1)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function workerUrl(): string | null {
   try {
-    return fileURLToPath(new URL('./engine-worker.js', import.meta.url))
+    const url = new URL('./engine-worker-web.js', import.meta.url)
+    return url.href
   } catch {
     return null
   }
@@ -43,11 +51,7 @@ function arrKind(arr: NumArr): ArrKind {
 function toShared(arr: NumArr): { buffer: SharedArrayBuffer; kind: ArrKind; length: number } {
   const kind = arrKind(arr)
   const buf = arr.buffer
-  if (
-    buf instanceof SharedArrayBuffer &&
-    arr.byteOffset === 0 &&
-    arr.byteLength === buf.byteLength
-  ) {
+  if (buf instanceof SharedArrayBuffer && arr.byteOffset === 0 && arr.byteLength === buf.byteLength) {
     return { buffer: buf, kind, length: arr.length }
   }
   const sab = new SharedArrayBuffer(arr.length * arr.BYTES_PER_ELEMENT)
@@ -55,194 +59,6 @@ function toShared(arr: NumArr): { buffer: SharedArrayBuffer; kind: ArrKind; leng
   new Ctor(sab).set(arr as never)
   return { buffer: sab, kind, length: arr.length }
 }
-
-function destroyPool(): void {
-  if (!pool) return
-  for (const w of pool.workers) void w.terminate()
-  for (const [, p] of pool.pending) p.reject(new Error('worker pool destroyed'))
-  pool = null
-}
-
-function ensurePool(): Pool | null {
-  if (pool) return pool
-  const url = workerUrl()
-  if (!url) return null
-  const threads = Math.min(Math.max(1, cpus().length), 4)
-  if (threads <= 1) return null
-
-  const workers: Worker[] = []
-  const pending = new Map<number, Pending>()
-  const nextPool: Pool = { workers, rr: 0, pending, nextId: 1 }
-
-  for (let t = 0; t < threads; t++) {
-    const worker = new Worker(url)
-    worker.on('message', (msg: { id: number; ok: boolean; indices?: Uint32Array; count?: number; error?: string }) => {
-      const pend = pending.get(msg.id)
-      if (!pend) return
-      pending.delete(msg.id)
-      if (msg.ok) pend.resolve(msg.indices ?? msg.count ?? true)
-      else pend.reject(new Error(msg.error ?? 'worker job failed'))
-    })
-    worker.on('error', (err) => {
-      destroyPool()
-      for (const [, p] of pending) p.reject(err instanceof Error ? err : new Error(String(err)))
-    })
-    workers.push(worker)
-  }
-  pool = nextPool
-  return pool
-}
-
-function postJob<T>(job: Record<string, unknown>, transfer?: ArrayBuffer[]): Promise<T> {
-  const p = ensurePool()
-  if (!p) return Promise.reject(new Error('no worker pool'))
-  const id = p.nextId++
-  const worker = p.workers[p.rr++ % p.workers.length]!
-  return new Promise<T>((resolve, reject) => {
-    p.pending.set(id, {
-      resolve: resolve as (v: unknown) => void,
-      reject,
-    })
-    worker.postMessage({ ...job, id }, transfer ?? [])
-  })
-}
-
-export async function runParallelDualGt(
-  a: NumArr,
-  b: NumArr,
-  la: number,
-  lb: number,
-): Promise<Uint32Array> {
-  const n = a.length
-  const p = ensurePool()
-  if (!p) {
-    return dualGtIndices(
-      a as Float64Array | Float32Array | Int32Array | Uint32Array,
-      b as Float64Array | Float32Array | Int32Array | Uint32Array,
-      la,
-      lb,
-    )
-  }
-
-  const threads = p.workers.length
-  const chunk = Math.ceil(n / threads)
-  const sharedA = toShared(a)
-  const sharedB = toShared(b)
-  const maskBuf = new SharedArrayBuffer(n)
-  const mask = new Uint8Array(maskBuf)
-
-  try {
-    const counts = await Promise.all(
-      Array.from({ length: threads }, (_, t) => {
-        const start = t * chunk
-        const end = Math.min(n, start + chunk)
-        if (start >= end) return Promise.resolve(0)
-        return postJob<number>({
-          type: 'dualGt',
-          aBuffer: sharedA.buffer,
-          bBuffer: sharedB.buffer,
-          aKind: sharedA.kind,
-          bKind: sharedB.kind,
-          aLength: sharedA.length,
-          bLength: sharedB.length,
-          maskBuffer: maskBuf,
-          start,
-          end,
-          la,
-          lb,
-        })
-      }),
-    )
-
-    let total = 0
-    for (const c of counts) total += c
-    const out = new Uint32Array(total)
-    let j = 0
-    for (let i = 0; i < n; i++) {
-      out[j] = i
-      j += mask[i]!
-    }
-    return out
-  } catch {
-    destroyPool()
-    return dualGtIndices(
-      a as Float64Array | Float32Array | Int32Array | Uint32Array,
-      b as Float64Array | Float32Array | Int32Array | Uint32Array,
-      la,
-      lb,
-    )
-  }
-}
-
-export type GatherSpec = {
-  src: NumArr
-  /** Pre-allocated output buffer (same length as indices). */
-  out: NumArr
-}
-
-/**
- * Gather many typed columns in parallel. `indices` shared once; each column written into `out`.
- * Prefer SharedArrayBuffer-backed `out` (zero copy back). Falls back to sync on failure.
- */
-export async function runParallelGather(indices: Uint32Array, specs: GatherSpec[]): Promise<void> {
-  if (specs.length === 0) return
-  const p = ensurePool()
-  if (!p) {
-    for (const s of specs) {
-      for (let i = 0; i < indices.length; i++) s.out[i] = s.src[indices[i]!]! as never
-    }
-    return
-  }
-
-  const idxShared = toShared(indices)
-  try {
-    await Promise.all(
-      specs.map(async (s) => {
-        const src = toShared(s.src)
-        let outBuf: SharedArrayBuffer
-        const outKind = arrKind(s.out)
-        if (s.out.buffer instanceof SharedArrayBuffer && s.out.byteOffset === 0) {
-          outBuf = s.out.buffer
-        } else {
-          outBuf = new SharedArrayBuffer(s.out.length * s.out.BYTES_PER_ELEMENT)
-          const tmp = new (s.out.constructor as new (buffer: SharedArrayBuffer) => NumArr)(outBuf)
-          await postJob({
-            type: 'gather',
-            srcBuffer: src.buffer,
-            srcKind: src.kind,
-            srcLength: src.length,
-            idxBuffer: idxShared.buffer,
-            idxLength: indices.length,
-            outBuffer: outBuf,
-            outKind,
-          })
-          s.out.set(tmp as never)
-          return
-        }
-        await postJob({
-          type: 'gather',
-          srcBuffer: src.buffer,
-          srcKind: src.kind,
-          srcLength: src.length,
-          idxBuffer: idxShared.buffer,
-          idxLength: indices.length,
-          outBuffer: outBuf,
-          outKind,
-        })
-      }),
-    )
-  } catch {
-    destroyPool()
-    for (const s of specs) {
-      for (let i = 0; i < indices.length; i++) s.out[i] = s.src[indices[i]!]! as never
-    }
-  }
-}
-
-// --- Protocol v2: generic filter, sort, groupBy, unique ---
-
-type CmpOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
-type BufferSpec = { buffer: SharedArrayBuffer; kind: ArrKind; length: number }
 
 function viewLocal(kind: ArrKind, buffer: SharedArrayBuffer, length: number): ArrayLike<number> & { [i: number]: number } {
   switch (kind) {
@@ -254,7 +70,144 @@ function viewLocal(kind: ArrKind, buffer: SharedArrayBuffer, length: number): Ar
   }
 }
 
-/** Generic multi-cmp filter via workers. Returns matching row indices. */
+function cmpHolds(op: CmpOp, v: number, lit: number): boolean {
+  switch (op) {
+    case 'eq': return v === lit
+    case 'neq': return v !== lit
+    case 'gt': return v > lit
+    case 'gte': return v >= lit
+    case 'lt': return v < lit
+    case 'lte': return v <= lit
+  }
+}
+
+export function destroyPool(): void {
+  if (!pool) return
+  for (const w of pool.workers) void w.terminate()
+  for (const [, p] of pool.pending) p.reject(new Error('worker pool destroyed'))
+  pool = null
+}
+
+function ensurePool(): Pool | null {
+  if (pool) return pool
+  if (typeof Worker === 'undefined') return null
+  if (!sabAvailable()) return null
+  const url = workerUrl()
+  if (!url) return null
+  const cores = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4
+  const threads = Math.min(Math.max(1, cores - 1), 4)
+  if (threads <= 1) return null
+
+  const workers: Worker[] = []
+  const pending = new Map<number, Pending>()
+  const nextPool: Pool = { workers, rr: 0, pending, nextId: 1 }
+
+  for (let t = 0; t < threads; t++) {
+    const worker = new Worker(url, { type: 'module' })
+    worker.onmessage = (ev: MessageEvent) => {
+      const msg = ev.data as { id: number; ok: boolean; indices?: Uint32Array; count?: number; data?: Float64Array; error?: string }
+      const pend = pending.get(msg.id)
+      if (!pend) return
+      pending.delete(msg.id)
+      if (msg.ok) pend.resolve(msg.indices ?? msg.data ?? msg.count ?? true)
+      else pend.reject(new Error(msg.error ?? 'worker job failed'))
+    }
+    worker.onerror = (err) => {
+      destroyPool()
+      for (const [, p] of pending) p.reject(err instanceof Error ? err : new Error(String(err)))
+    }
+    workers.push(worker)
+  }
+  pool = nextPool
+  return pool
+}
+
+function postJob<T>(job: Omit<EngineJob, 'id'>, transfer: Transferable[] = []): Promise<T> {
+  const p = ensurePool()
+  if (!p) return Promise.reject(new Error('no worker pool'))
+  const id = p.nextId++
+  const worker = p.workers[p.rr++ % p.workers.length]!
+  return new Promise<T>((resolve, reject) => {
+    p.pending.set(id, { resolve: resolve as (v: unknown) => void, reject })
+    worker.postMessage({ ...job, id }, transfer)
+  })
+}
+
+type NumArrNoU8 = Float64Array | Float32Array | Int32Array | Uint32Array
+
+export async function runParallelDualGt(
+  a: NumArr,
+  b: NumArr,
+  la: number,
+  lb: number,
+): Promise<Uint32Array> {
+  const n = a.length
+  const p = ensurePool()
+  if (!p) return dualGtIndices(a as NumArrNoU8, b as NumArrNoU8, la, lb)
+
+  const threads = p.workers.length
+  const chunk = Math.ceil(n / threads)
+  const aShared = toShared(a)
+  const bShared = toShared(b)
+  const maskBuf = new SharedArrayBuffer(n)
+  const mask = new Uint8Array(maskBuf)
+
+  try {
+    await Promise.all(
+      Array.from({ length: threads }, (_, t) => {
+        const start = t * chunk
+        const end = Math.min(n, start + chunk)
+        if (start >= end) return Promise.resolve()
+        return postJob<number>({
+          type: 'dualGt',
+          aBuffer: aShared.buffer, aKind: aShared.kind, aLength: aShared.length,
+          bBuffer: bShared.buffer, bKind: bShared.kind, bLength: bShared.length,
+          la, lb, maskBuffer: maskBuf, start, end,
+        })
+      }),
+    )
+    let total = 0
+    for (let i = 0; i < n; i++) if (mask[i]) total++
+    const out = new Uint32Array(total)
+    let j = 0
+    for (let i = 0; i < n; i++) if (mask[i]) out[j++] = i
+    return out
+  } catch {
+    destroyPool()
+    return dualGtIndices(a as NumArrNoU8, b as NumArrNoU8, la, lb)
+  }
+}
+
+export async function runParallelGather(
+  _table: unknown,
+  indices: Uint32Array,
+  specs: Array<{ src: NumArr; out: NumArr }>,
+): Promise<void> {
+  const p = ensurePool()
+  if (!p) {
+    for (const s of specs) for (let i = 0; i < indices.length; i++) s.out[i] = s.src[indices[i]!]! as never
+    return
+  }
+  const idxBuf = new SharedArrayBuffer(indices.length * 4)
+  new Uint32Array(idxBuf).set(indices)
+  await Promise.all(
+    specs.map((s) => {
+      const srcShared = toShared(s.src)
+      const outBuf = new SharedArrayBuffer(s.out.length * s.out.BYTES_PER_ELEMENT)
+      return postJob<void>({
+        type: 'gather',
+        srcBuffer: srcShared.buffer, srcKind: srcShared.kind, srcLength: srcShared.length,
+        idxBuffer: idxBuf, idxLength: indices.length,
+        outBuffer: outBuf, outKind: arrKind(s.src),
+      }).then(() => {
+        const Ctor = s.out.constructor as new (buffer: SharedArrayBuffer) => NumArr
+        const view = new Ctor(outBuf)
+        for (let i = 0; i < s.out.length; i++) s.out[i] = view[i]! as never
+      })
+    }),
+  )
+}
+
 export async function runParallelFilter(
   cols: NumArr[],
   ops: CmpOp[],
@@ -271,7 +224,7 @@ export async function runParallelFilter(
   const mask = new Uint8Array(maskBuf)
 
   try {
-    const counts = await Promise.all(
+    await Promise.all(
       Array.from({ length: threads }, (_, t) => {
         const start = t * chunk
         const end = Math.min(n, start + chunk)
@@ -284,7 +237,7 @@ export async function runParallelFilter(
       }),
     )
     let total = 0
-    for (const c of counts) total += c
+    for (let i = 0; i < n; i++) if (mask[i]) total++
     const out = new Uint32Array(total)
     let j = 0
     for (let i = 0; i < n; i++) if (mask[i]) out[j++] = i
@@ -300,39 +253,14 @@ function syncFilter(cols: NumArr[], ops: CmpOp[], lits: number[], n: number): Ui
   for (let i = 0; i < n; i++) {
     let hit = true
     for (let c = 0; c < cols.length; c++) {
-      const v = cols[c]![i]!
-      if (!cmpHolds(ops[c]!, v, lits[c]!)) { hit = false; break }
+      if (!cmpHolds(ops[c]!, cols[c]![i]!, lits[c]!)) { hit = false; break }
     }
     if (hit) out.push(i)
   }
   return new Uint32Array(out)
 }
 
-function cmpHolds(op: CmpOp, v: number, lit: number): boolean {
-  switch (op) {
-    case 'eq': return v === lit
-    case 'neq': return v !== lit
-    case 'gt': return v > lit
-    case 'gte': return v >= lit
-    case 'lt': return v < lit
-    case 'lte': return v <= lit
-  }
-}
-
-type SortKeySpec = {
-  buffer: SharedArrayBuffer
-  kind: ArrKind
-  length: number
-  descending: boolean
-  nullsLast: boolean
-  nullBitmap?: SharedArrayBuffer | null
-}
-
-/** Parallel sort: each worker sorts a row chunk; main k-way merges. */
-export async function runParallelSort(
-  keys: SortKeySpec[],
-  n: number,
-): Promise<Uint32Array> {
+export async function runParallelSort(keys: SortKeySpec[], n: number): Promise<Uint32Array> {
   const p = ensurePool()
   if (!p) return syncSort(keys, n)
 
@@ -346,10 +274,10 @@ export async function runParallelSort(
         const end = Math.min(n, start + chunk)
         if (start >= end) return new Uint32Array(0)
         const outBuf = new SharedArrayBuffer((end - start) * 4)
-        const result = await postJob<Uint32Array>({
+        const r = await postJob<Uint32Array>({
           type: 'sortChunk', keys, outIdxBuffer: outBuf, start, end,
         })
-        return result as unknown as Uint32Array
+        return (r as unknown as Uint32Array) ?? new Uint32Array(outBuf, 0, end - start)
       }),
     )
     return kWayMerge(chunkResults, keys)
@@ -418,8 +346,6 @@ function kWayMerge(chunks: Uint32Array[], keys: SortKeySpec[]): Uint32Array {
   return out
 }
 
-type AggSpec = { op: 'sum' | 'mean' | 'count' | 'min' | 'max'; colIdx: number }
-
 export type ParallelGroupResult = {
   data: Float64Array
   groupCount: number
@@ -427,7 +353,8 @@ export type ParallelGroupResult = {
   aggCount: number
 }
 
-/** Parallel groupBy: each worker aggregates a chunk; main merges partial accs. */
+const PER_AGG = 5
+
 export async function runParallelGroupBy(
   keyCols: NumArr[],
   aggCols: NumArr[],
@@ -462,8 +389,6 @@ export async function runParallelGroupBy(
     return syncGroupBy(keyCols, aggCols, aggs, n)
   }
 }
-
-const PER_AGG = 5
 
 function syncGroupBy(
   keyCols: NumArr[], aggCols: NumArr[], aggs: AggSpec[], n: number,
@@ -530,7 +455,6 @@ function mergePartialGroups(
   keyCount: number, aggCount: number,
 ): ParallelGroupResult {
   const merged = new Map<string, Float64Array>()
-  const rowLen = 1 + keyCount + aggCount * PER_AGG
   for (const { data } of results) {
     let pos = 0
     while (pos < data.length) {
@@ -600,11 +524,7 @@ function serializeGroupsData(
   return data
 }
 
-/** Parallel unique: each worker dedupes a chunk; main merges first-seen sets. */
-export async function runParallelUnique(
-  cols: NumArr[],
-  n: number,
-): Promise<Uint32Array> {
+export async function runParallelUnique(cols: NumArr[], n: number): Promise<Uint32Array> {
   const p = ensurePool()
   if (!p) return syncUnique(cols, n)
 
@@ -625,7 +545,6 @@ export async function runParallelUnique(
         })
       }),
     )
-    // Merge: keep first-seen across chunks
     const seen = new Set<string>()
     const out: number[] = []
     for (const chunkIdx of results) {
@@ -654,7 +573,6 @@ function syncUnique(cols: NumArr[], n: number): Uint32Array {
   return new Uint32Array(out)
 }
 
-/** Graceful pool shutdown (for tests / process exit). */
 export function closePool(): void {
   destroyPool()
 }

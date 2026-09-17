@@ -37,7 +37,19 @@ credentials.json
 # Benchmark result dumps (keep .gitkeep)
 packages/bench/results/*.json
 packages/bench/results/*.csv
+packages/bench/results/*.log
 !packages/bench/results/.gitkeep
+
+# Regenerable / scale-specific bench reports (canonical public report is docs/comparison-js.md = 2M)
+docs/comparison-js-*m.md
+docs/*.md.bak
+
+# Local profiling / one-off microbench harnesses (not part of the public tree)
+packages/bench/src/profile-*.mts
+packages/bench/src/profile-*.ts
+scripts/bench-*.mts
+scripts/bench-*.mjs
+# scripts/consumer-test.mjs stays tracked — used by CI (`test:consumer`)
 
 # Local npm name-research / claim scratch (not for public repo)
 _npm-free.txt

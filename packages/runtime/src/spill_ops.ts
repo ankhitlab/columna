@@ -16,7 +16,7 @@ import type { ExprNode } from './types.js'
 import { memoryBudget, recordLiveBytes, spillEnabled } from './memory.js'
 import { concatTables, spillRead, spillTempPath, spillUnlink, spillUnlinkMany, spillWrite } from './spill.js'
 
-type SortKey = { expr: ExprNode; descending: boolean }
+type SortKey = { expr: ExprNode; descending: boolean; nullsLast?: boolean }
 
 type EvalRow = (expr: ExprNode, table: TableView, row: number) => unknown
 
@@ -89,8 +89,9 @@ function compareHead(
     const va = evalRow(key.expr, ta, ia)
     const vb = evalRow(key.expr, tb, ib)
     if (va === vb) continue
-    if (va === null || va === undefined) return 1
-    if (vb === null || vb === undefined) return -1
+    const nullsLast = key.nullsLast !== false
+    if (va === null || va === undefined) return nullsLast ? 1 : -1
+    if (vb === null || vb === undefined) return nullsLast ? -1 : 1
     const cmp = (va as number | string | boolean) < (vb as number | string | boolean) ? -1 : 1
     return key.descending ? -cmp : cmp
   }

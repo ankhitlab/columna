@@ -38,6 +38,8 @@ export {
   setDefaultRuntime,
   CpuBackend,
   executeCpu,
+  optimizePlan,
+  estimatePlanRows,
   tryLoadNativeKernels,
   isNativeKernelsLoaded,
   setNativeKernels,
