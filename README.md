@@ -27,7 +27,6 @@ const out = await DataFrame.fromRows([
 - IO for CSV / JSON / Excel / Parquet; optional SQL and Kafka batch reads via peer drivers
 - `columna/advanced`: Minitab-level statistics (~250 procedures) with fixture, property and Monte-Carlo tests
 - Dual ESM / CommonJS builds with TypeScript declarations
-- Optional browser IDE: Columna Studio (workspace app)
 
 ## Packages
 
@@ -40,7 +39,6 @@ const out = await DataFrame.fromRows([
 | `@columna/wasm` | Portable WASM kernels |
 | `@columna/webgpu` | WebGPU compute path |
 | `@columna/advanced` | **advanced**: Minitab-parity stats — tests, regression, SPC, DOE, time series, reliability, multivariate, predictive (`columna/advanced`) |
-| `columna-studio` | Spyder-like web IDE for columna |
 
 ## Installation
 
@@ -123,17 +121,6 @@ Browser **WebGPU** micro-bench (Chrome/Edge; filter / map / pipeline vs CPU):
 pnpm bench:webgpu
 ```
 
-## Columna Studio
-
-Spyder-style browser IDE: Monaco editor, REPL, Variable Explorer, DataFrame viewer, plots.
-
-```bash
-pnpm install
-pnpm studio
-```
-
-Opens `http://localhost:5173`. Shortcuts: `Ctrl+Enter` run buffer/selection, `Shift+Enter` run line. Drop a `.csv` to load it as a DataFrame.
-
 ## Development
 
 ```bash
@@ -141,6 +128,8 @@ pnpm install
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:stress          # adversarial load identities (20–80k rows)
+# STRESS_HEAVY=1 pnpm test:stress   # ~10× rows, local/nightly
 pnpm build
 ```
 
@@ -591,12 +580,21 @@ cell, 4 per i32 / u32 / f32 / category code, 1 per bool, plus a JS string per ut
 of the operation (a sort or join materialises index arrays; a groupBy its accumulators). 100M rows × 8 f64 columns is
 6.4 GB of buffers before any operation — state a schema, an operation and a peak RSS with any row count.
 
-- **CSV in**: `readCsv({ path })` streams the file in 1 MB chunks straight into typed column builders — no row objects,
-  no full-text copy; text columns are dictionary-encoded on the fly. 2M rows × 8 columns (107 MB CSV): 2.9 s, peak RSS
-  477 MB vs 4.2 s / 990 MB for the previous row-object path (Node 24, single thread; `pnpm bench:e2e`).
+- **Soft budget + spill (Node):** `setMemoryPolicy({ maxBytes, spillDir? })` or `collect({ memory: { maxBytes } })`.
+  When live estimates exceed the budget, sort / unique / join write columnar temp files under `spillDir`
+  (default `os.tmpdir()/columna-spill`) and merge back; `collectWithReport()` exposes `spilledBytes` / `peakBytes`.
+  Spill is off in the browser (`spill: true` throws).
+- **`persist()` / `unpersist()`:** cache a collected plan by structural hash (LRU capped by `maxCacheBytes`);
+  subsequent identical collects set `report.cacheHit`. Nothing is cached unless you call `persist()`.
+- **Views:** plain `select` reuses column buffers; filters keep a selection index until gather / sort / join.
+- **CSV in**: `readCsv({ path })` prefers optional `@columna/native` Rayon parse (typed builders), then a
+  worker_threads pool for large unquoted files, else a fused single-thread scanner into column builders — no row
+  objects on the hot path; text columns are dictionary-encoded on the fly. On the 2M × 8 compare-js fixture
+  (~107 MB): warm read ~280 ms with the native addon present (Node 24; see [docs/comparison-js.md](docs/comparison-js.md)).
   `nRows` stops the read early; `maxBytes` is enforced on bytes read.
-- **CSV out**: `writeCsv(path)` streams 16 384-row chunks with back-pressure; only one chunk of cell strings exists at a
-  time. `toCsv()` necessarily builds the whole string.
+- **CSV out**: `writeCsv(path)` uses native unquoted write when safe, otherwise streams 32 768-row string chunks with
+  back-pressure. Warm write of the filtered ~1.24M-row compare-js frame is ~44 ms with native. `toCsv()` necessarily
+  builds the whole string.
 - **JSON / Excel / Parquet in**: still whole-file → row objects → columns (Parquet no longer copies the input buffer). Budget
   roughly 3–5× the file size in peak RSS for these.
 - **SQL**: `nRows` slices the driver's result **after** it arrived — it bounds the DataFrame, not the query, the transfer
@@ -610,6 +608,22 @@ peak RSS sampled during the run, and the backend that actually executed each nod
 WebGPU runs a **hybrid** plan: numeric AND-filters and col∋lit maps on the GPU (with buffer residency), other ops on CPU. Call `await init()` so the device is ready before `collect()`.
 
 GPU results are **bit-identical to the CPU**: the filter kernel compares `i32` / `u32` / `f32` columns in their own type (no float32 rounding of integers past 2^24) and honours the null bitmap; `f64` / `datetime` columns, bool / category columns and literals the column type cannot hold exactly (`x > 2.5` on `i32`, `x > 0.1` on `f32`) stay on the CPU. `init({ gpuLossyF32: true })` opts into the approximate float32 path for those cases.
+
+## What CI verifies
+
+- **check** (Node 18 / 20 / 22): lint, build, typecheck (including the type-level schema tests), the vitest suite —
+  fixtures against scipy / numpy / NIST, property and Monte-Carlo tests, the adversarial statistics set, the
+  data-invariant suite (seeded random frames: partition identities, format round-trips CSV / JSON / parquet-like /
+  Arrow-like, requested-vs-actual engine equivalence), and CI-sized stress identities (`pnpm test:stress`: nulls,
+  joins, sortMulti, CSV round-trip, spill).
+- **consumer**: `pnpm pack` of every published package installed with npm into a clean project; ESM, CommonJS, the
+  `columna/core` and `columna/advanced` subpaths and the TypeScript declarations are exercised (`pnpm test:consumer`).
+- **browser**: the built `columna` bundle is bundled by Vite with no aliases and run in headless Chromium with
+  Playwright (`pnpm test:browser`): import side-effect freedom, CSV → filter → groupBy → join → CSV on 200k rows, typed
+  exactness, `columna/advanced`. The WebGPU checks (strict GPU filter ≡ CPU rows, f64 refusal with a reason) run only
+  when the browser exposes an adapter; headless CI runners do not, so they are exercised on a developer machine
+  (`SMOKE_HEADED=1 SMOKE_CHANNEL=chrome pnpm test:browser`) and in the shader-emulation tests under Node.
+- **windows**: the vitest suite on windows-latest.
 
 ## Contributing
 

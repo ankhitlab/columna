@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 rayon = "1.10"
+itoa = "1.0"
+ryu = "1.0"
 
 [build-dependencies]
 napi-build = "2"

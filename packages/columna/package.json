@@ -1,6 +1,6 @@
 {
   "name": "columna",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Fluent DataFrame for TypeScript with WASM and WebGPU",
   "license": "MIT",
   "publishConfig": {
@@ -69,6 +69,9 @@
     "hyparquet": "^1.30.0",
     "hyparquet-compressors": "^1.1.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "optionalDependencies": {
+    "@columna/native": "workspace:*"
   },
   "peerDependencies": {
     "@clickhouse/client": "^1.8.0",

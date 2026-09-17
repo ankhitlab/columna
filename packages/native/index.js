@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { filterAnd2I32F64, filterAnd2I32I32, gatherF64, gatherI32, joinProbeDenseI32, joinSemiDenseI32, groupbySumsF64, strContains, strToLower } = nativeBinding
+const { filterAnd2I32F64, filterAnd2I32I32, gatherF64, gatherI32, joinProbeDenseI32, joinSemiDenseI32, groupbySumsF64, strContains, strToLower, parseCsvUnquoted, writeCsvUnquoted } = nativeBinding
 
 module.exports.filterAnd2I32F64 = filterAnd2I32F64
 module.exports.filterAnd2I32I32 = filterAnd2I32I32
@@ -321,3 +321,5 @@ module.exports.joinSemiDenseI32 = joinSemiDenseI32
 module.exports.groupbySumsF64 = groupbySumsF64
 module.exports.strContains = strContains
 module.exports.strToLower = strToLower
+module.exports.parseCsvUnquoted = parseCsvUnquoted
+module.exports.writeCsvUnquoted = writeCsvUnquoted

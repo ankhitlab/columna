@@ -19,4 +19,6 @@ export const joinSemiDenseI32 = native.joinSemiDenseI32
 export const groupbySumsF64 = native.groupbySumsF64
 export const strContains = native.strContains
 export const strToLower = native.strToLower
+export const parseCsvUnquoted = native.parseCsvUnquoted
+export const writeCsvUnquoted = native.writeCsvUnquoted
 export const isNativeLoaded = typeof native.filterAnd2I32F64 === 'function'

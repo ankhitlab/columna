@@ -630,9 +630,9 @@ export class WebGpuBackend implements Backend {
       if (mapped) {
         const input = await this.executeHybrid(plan.input, ctx)
         const col = getColumn(input, mapped.column)
-        // The map kernel computes in float32: exact only for f32 columns (their result dtype is f32 anyway);
-        // other numeric dtypes would silently lose precision, so they need the lossy opt-in.
-        if (col.field.dtype === 'f32' || (this.options.lossyF32 && isNumeric(col.field.dtype))) {
+        // GPU map kernel is float32-only. CPU arith always materializes f64, so even an f32 input
+        // would diverge in value and dtype unless the caller opts into lossyF32.
+        if (this.options.lossyF32 && isNumeric(col.field.dtype)) {
           const t0 = now()
           const f32 = columnToF32(col, input.numRows)
           const tConv = now()
@@ -648,7 +648,11 @@ export class WebGpuBackend implements Backend {
           return out
         }
         const input2 = input
-        return this.cpuNode({ type: 'withColumn', input: { type: 'scan', table: input2 }, name: plan.name, expr: plan.expr }, `column "${mapped.column}" is ${col.field.dtype}: the float32 map kernel is exact for f32 only (init({ gpuLossyF32: true }) to allow)`, ctx)
+        return this.cpuNode(
+          { type: 'withColumn', input: { type: 'scan', table: input2 }, name: plan.name, expr: plan.expr },
+          `column "${mapped.column}" is ${col.field.dtype}: GPU map is float32-lossy (init({ gpuLossyF32: true }) to allow)`,
+          ctx,
+        )
       }
       const input = await this.executeHybrid(plan.input, ctx)
       return this.cpuNode({ type: 'withColumn', input: { type: 'scan', table: input }, name: plan.name, expr: plan.expr }, 'expression is not "col ARITH number"', ctx)

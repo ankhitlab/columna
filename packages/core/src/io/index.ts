@@ -30,7 +30,7 @@ export type {
   KafkaSaslOptions,
   ReadKafkaOptions,
 } from './kafka/types.js'
-export { parseCsvToRows, parseCsvLine } from './csv.js'
+export { parseCsvToRows, parseCsvLine, parseCsvLineInto } from './csv.js'
 export { parseJsonToRows } from './json.js'
 export { parseExcelToRows } from './excel.js'
 export { parseParquetToRows } from './parquet.js'

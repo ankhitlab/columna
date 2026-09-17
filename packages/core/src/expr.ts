@@ -165,15 +165,15 @@ export class Expr<T = any, N extends string = string> {
     return new Expr({ type: 'clip', expr: this.node, min, max })
   }
 
-  shift(periods = 1): Expr<T, N> {
+  shift(periods = 1): Expr<T | null, N> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'shift' })
   }
 
-  diff(periods = 1): Expr<number, N> {
+  diff(periods = 1): Expr<number | null, N> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'diff' })
   }
 
-  pctChange(periods = 1): Expr<number, N> {
+  pctChange(periods = 1): Expr<number | null, N> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'pctChange' })
   }
 

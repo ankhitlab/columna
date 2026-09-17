@@ -48,3 +48,7 @@ _dfkit-claim/
 
 # Pack artifacts
 *.tgz
+packages/browser-smoke/dist
+
+# Local-only IDE (not part of the public repository)
+packages/studio/

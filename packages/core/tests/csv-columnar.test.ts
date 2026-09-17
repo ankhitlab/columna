@@ -107,6 +107,58 @@ describe('columnar CSV path equals the row-object path', () => {
     await expect(DataFrame.readCsv(path, { maxBytes: 1000 })).rejects.toThrow(/maxBytes/)
     await expect(DataFrame.readCsv(path, { allowedDirs: [join(DIR, 'elsewhere')] })).rejects.toThrow(/allowedDirs/)
   })
+
+  it('fused unquoted path matches row path on spaced text, nulls, bools, and wide ints', () => {
+    const text = [
+      'a,b,c,d,e',
+      '1,  hi  ,true,NA,2147483648',
+      '2,x,FALSE,null,3.25',
+      '3,,True,,',
+    ].join('\n')
+    const a = DataFrame.fromCSV(text)
+    const b = DataFrame.fromCSVRows(text)
+    expect(a.columns).toEqual(b.columns)
+    expect(a.toArray()).toEqual(b.toArray())
+    expect(a.getColumn('e').dtype).toBe('f64')
+    expect(a.toArray()[0]).toEqual({ a: 1, b: '  hi  ', c: true, d: null, e: 2147483648 })
+  })
+
+  it('native CSV parse matches JS fused path when addon is loaded', async () => {
+    const { tryParseCsvNative } = await import('../src/io/csv-parallel.js')
+    const n = 5_000
+    const lines = ['id,age,salary,city']
+    for (let i = 0; i < n; i++) lines.push(`${i},${20 + (i % 40)},${(1000 + i * 0.25).toFixed(2)},${['A', 'B', 'C'][i % 3]}`)
+    const path = join(DIR, 'native.csv')
+    writeFileSync(path, lines.join('\n'))
+    const js = await DataFrame.readCsv(path)
+    const native = await tryParseCsvNative(path, {})
+    if (!native) return // addon optional in CI without rebuild
+    const ndf = new DataFrame(native)
+    expect(ndf.shape).toEqual(js.shape)
+    expect(ndf.columns).toEqual(js.columns)
+    expect(ndf.getColumn('salary').toArray().slice(0, 20)).toEqual(js.getColumn('salary').toArray().slice(0, 20))
+    expect(ndf.getColumn('city').toArray().slice(0, 20)).toEqual(js.getColumn('city').toArray().slice(0, 20))
+  })
+
+  it('native CSV write round-trips unquoted tables when addon is loaded', async () => {
+    const n = 20_000
+    const df = DataFrame.fromColumns({
+      i: Int32Array.from({ length: n }, (_, k) => k),
+      f: Float64Array.from({ length: n }, (_, k) => k + 0.25),
+      city: Array.from({ length: n }, (_, k) => ['Berlin', 'Paris', 'Rome'][k % 3]!),
+    })
+    const path = join(DIR, 'native-out.csv')
+    const ret = await df.writeCsv(path)
+    expect(ret).toBe('')
+    const back = await DataFrame.readCsv(path)
+    expect(back.shape).toEqual(df.shape)
+    expect(back.getColumn('i').toArray().slice(0, 10)).toEqual(df.getColumn('i').toArray().slice(0, 10))
+    expect(back.getColumn('city').toArray().slice(0, 10)).toEqual(df.getColumn('city').toArray().slice(0, 10))
+    // Floats: allow tiny formatter differences between JS String() and native ryu.
+    const a = back.getColumn('f').toArray() as number[]
+    const b = df.getColumn('f').toArray() as number[]
+    for (let i = 0; i < 50; i++) expect(Math.abs(a[i]! - b[i]!)).toBeLessThan(1e-9)
+  })
 })
 
 describe('CSV writer streams to disk in bounded chunks', () => {

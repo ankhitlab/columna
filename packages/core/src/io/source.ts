@@ -88,7 +88,69 @@ function fileUrlToPath(href: string): string {
 
 // ---- policy checks -------------------------------------------------------------------------------
 
-const PRIVATE_HOST = /^(localhost|.*\.localhost|0\.0\.0\.0|127(\.\d{1,3}){3}|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2}|169\.254(\.\d{1,3}){2}|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])(\.\d{1,3}){2}|\[?::1\]?|\[?fc[0-9a-f]{2}:.*|\[?fd[0-9a-f]{2}:.*|\[?fe80:.*|metadata\.google\.internal)$/i
+const NAME_PRIVATE_HOST =
+  /^(localhost|.*\.localhost|metadata\.google\.internal)$/i
+
+function stripBrackets(host: string): string {
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+}
+
+/** Parse IPv4-mapped IPv6 (`::ffff:127.0.0.1` or `::ffff:7f00:1`) to dotted IPv4, else null. */
+function ipv4MappedToV4(host: string): string | null {
+  const h = host.toLowerCase()
+  const mDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h)
+  if (mDotted) return mDotted[1]!
+  const mHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h)
+  if (!mHex) return null
+  const hi = parseInt(mHex[1]!, 16)
+  const lo = parseInt(mHex[2]!, 16)
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
+}
+
+function ipv4Octets(host: string): number[] | null {
+  const parts = host.split('.')
+  if (parts.length !== 4) return null
+  const nums = parts.map((p) => Number(p))
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null
+  return nums
+}
+
+function isPrivateIpv4(host: string): boolean {
+  const o = ipv4Octets(host)
+  if (!o) return false
+  const [a, b] = o
+  if (a === 0 || a === 127) return true // 0.0.0.0/8, 127.0.0.0/8
+  if (a === 10) return true
+  if (a === 192 && b === 168) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b! >= 16 && b! <= 31) return true
+  if (a === 100 && b! >= 64 && b! <= 127) return true // CGNAT 100.64.0.0/10
+  return false
+}
+
+function isPrivateIpv6(host: string): boolean {
+  const h = host.toLowerCase()
+  if (h === '::1' || h === '0:0:0:0:0:0:0:1') return true
+  // ULA fc00::/7, link-local fe80::/10
+  if (h.startsWith('fc') || h.startsWith('fd')) return true
+  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true
+  const mapped = ipv4MappedToV4(h)
+  if (mapped) return isPrivateIpv4(mapped)
+  return false
+}
+
+/** True when hostname is loopback / private / link-local / cloud metadata (literal IP or name). */
+export function isDeniedPrivateHost(hostname: string): boolean {
+  const raw = hostname.trim()
+  if (!raw) return false
+  if (NAME_PRIVATE_HOST.test(raw)) return true
+  const host = stripBrackets(raw)
+  if (isPrivateIpv4(host)) return true
+  // Heuristic IPv6: contains ':' (URL hostname for v6 is bracketed, then stripped)
+  if (host.includes(':')) return isPrivateIpv6(host)
+  return false
+}
 
 function hostAllowed(host: string, port: string, allowed: string[]): boolean {
   const h = host.toLowerCase()
@@ -106,7 +168,7 @@ function checkUrlPolicy(url: URL, policy: IoPolicy): void {
     throw new Error(`IO policy: protocol "${url.protocol}" is not allowed for ${url.href}`)
   }
   if (url.username || url.password) throw new Error(`IO policy: credentials in URLs are not allowed (${url.host})`)
-  if (policy.denyPrivateHosts && PRIVATE_HOST.test(url.hostname)) {
+  if (policy.denyPrivateHosts && isDeniedPrivateHost(url.hostname)) {
     throw new Error(`IO policy: host "${url.hostname}" is a loopback / private / link-local address`)
   }
   if (policy.allowedHosts && !hostAllowed(url.hostname, url.port || defaultPort(url.protocol), policy.allowedHosts)) {

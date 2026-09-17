@@ -387,6 +387,33 @@ export function readParquetLike(bytes: Uint8Array): TableView {
       }
       return { field: { ...field }, data, nullBitmap: anyNull ? nullBitmap : undefined }
     }
+    if (field.dtype === 'category') {
+      // The writer stores the decoded strings (plus the dictionary); re-encode them. Feeding the strings to
+      // setValue(…, 'category') coerced every one to code 0, which silently collapsed the column to its
+      // first dictionary entry on read (caught by the round-trip invariant test).
+      const dict: string[] = c.dictionary ? [...c.dictionary] : []
+      const index = new Map<string, number>(dict.map((d, k) => [d, k]))
+      const codes = new Uint32Array(c.values.length)
+      let anyNull = false
+      const nullBitmap = new Uint8Array(Math.ceil(c.values.length / 8) || 1)
+      for (let i = 0; i < c.values.length; i++) {
+        const v = c.values[i]
+        if (v == null) {
+          anyNull = true
+          continue
+        }
+        setValid(nullBitmap, i, true)
+        const key = String(v)
+        let code = index.get(key)
+        if (code === undefined) {
+          code = dict.length
+          dict.push(key)
+          index.set(key, code)
+        }
+        codes[i] = code
+      }
+      return { field: { ...field }, data: codes, nullBitmap: anyNull ? nullBitmap : undefined, dictionary: dict }
+    }
     const data = allocateData(field.dtype, c.values.length)
     let anyNull = false
     const nullBitmap = new Uint8Array(Math.ceil(c.values.length / 8) || 1)
@@ -403,7 +430,6 @@ export function readParquetLike(bytes: Uint8Array): TableView {
       field: { ...field },
       data,
       nullBitmap: anyNull ? nullBitmap : undefined,
-      dictionary: c.dictionary,
     }
   })
   return tableFromColumns(columns)

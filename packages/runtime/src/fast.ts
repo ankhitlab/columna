@@ -37,55 +37,55 @@ function numericView(col: Column): NumArr | null {
   return col.data as NumArr
 }
 
-function gather(table: TableView, indices: ArrayLike<number>, keep?: readonly string[]): TableView {
+export function gather(table: TableView, indices: ArrayLike<number>, keep?: readonly string[]): TableView {
   const n = indices.length
-  if (n >= NATIVE_GATHER_MIN_ROWS && isNativeKernelsLoaded()) {
-    const k = getNativeKernels()
-    if (k.gatherF64 || k.gatherI32) {
-      const cols =
-        keep && keep.length > 0
-          ? keep.map((name) => {
-              const col = table.columns.find((c) => c.field.name === name)
-              if (!col) throw new Error(`Unknown column "${name}" in gather`)
-              return col
-            })
-          : table.columns
-      const idx =
-        indices instanceof Uint32Array
-          ? indices
-          : Uint32Array.from({ length: n }, (_, i) => indices[i] as number)
-      return tableFromColumns(
-        cols.map((c) => {
-          if (c.nullBitmap) return takeColumn(c, idx)
-          const d = c.field.dtype
-          if ((d === 'f64' || d === 'datetime') && k.gatherF64 && c.data instanceof Float64Array) {
-            return { field: c.field, data: k.gatherF64(c.data, idx), dictionary: c.dictionary }
+  const cols =
+    keep && keep.length > 0
+      ? keep.map((name) => {
+          const col = table.columns.find((c) => c.field.name === name)
+          if (!col) throw new Error(`Unknown column "${name}" in gather`)
+          return col
+        })
+      : table.columns
+  const idx =
+    indices instanceof Uint32Array ? indices : Uint32Array.from({ length: n }, (_, i) => indices[i] as number)
+
+  // Prefer native gather when loaded; otherwise a tight typed JS gather for no-null columns.
+  const k = n >= NATIVE_GATHER_MIN_ROWS && isNativeKernelsLoaded() ? getNativeKernels() : null
+  if (k && (k.gatherF64 || k.gatherI32)) {
+    return tableFromColumns(
+      cols.map((c) => {
+        if (c.nullBitmap) return takeColumn(c, idx)
+        const d = c.field.dtype
+        if ((d === 'f64' || d === 'datetime') && k.gatherF64 && c.data instanceof Float64Array) {
+          return { field: c.field, data: k.gatherF64(c.data, idx), dictionary: c.dictionary }
+        }
+        if ((d === 'i32' || d === 'category' || d === 'u32') && k.gatherI32) {
+          const src =
+            c.data instanceof Int32Array
+              ? c.data
+              : c.data instanceof Uint32Array
+                ? new Int32Array(c.data.buffer, c.data.byteOffset, c.data.length)
+                : null
+          if (src && d === 'i32') {
+            return { field: c.field, data: k.gatherI32(src, idx), dictionary: c.dictionary }
           }
-          if ((d === 'i32' || d === 'category' || d === 'u32') && k.gatherI32) {
-            const src =
-              c.data instanceof Int32Array
-                ? c.data
-                : c.data instanceof Uint32Array
-                  ? new Int32Array(c.data.buffer, c.data.byteOffset, c.data.length)
-                  : null
-            if (src && d === 'i32') {
-              return { field: c.field, data: k.gatherI32(src, idx), dictionary: c.dictionary }
-            }
-            if (src && (d === 'category' || d === 'u32')) {
-              const out = k.gatherI32(src, idx)
-              return {
-                field: c.field,
-                data: new Uint32Array(out.buffer, out.byteOffset, out.length),
-                dictionary: c.dictionary,
-              }
+          if (src && (d === 'category' || d === 'u32')) {
+            const out = k.gatherI32(src, idx)
+            return {
+              field: c.field,
+              data: new Uint32Array(out.buffer, out.byteOffset, out.length),
+              dictionary: c.dictionary,
             }
           }
-          return takeColumn(c, idx)
-        }),
-      )
-    }
+        }
+        return takeColumn(c, idx)
+      }),
+    )
   }
-  return takeTable(table, indices, keep)
+
+  // JS: reuse takeColumn's typed no-null paths with a single Uint32Array index buffer.
+  return tableFromColumns(cols.map((c) => takeColumn(c, idx)))
 }
 
 export function flattenAnd(expr: ExprNode): ExprNode[] | null {
@@ -351,25 +351,31 @@ const RADIX_BUCKETS = 65536
  * Stable argsort of a numeric column: LSD radix sort on the sign-corrected 64-bit pattern of each
  * value (4 passes × 16 bits). Nulls go last in input order. ~5–10× faster than `idx.sort(cmp)` at
  * 1M+ rows and independent of key distribution. NaN sorts after +Infinity; −0 sorts before +0.
+ *
+ * When `order` is provided, re-sort that permutation stably by `data[order[i]]` (successive multi-key
+ * radix: pass previous pass's indices here).
  */
 export function argsortNumeric(
   data: ArrayLike<number>,
   n: number,
   nullBitmap: Uint8Array | undefined,
   descending = false,
+  order?: Uint32Array,
 ): Uint32Array {
   const tmp = new Float64Array(1)
   const tv = new Uint32Array(tmp.buffer)
   const LO = LITTLE_ENDIAN ? 0 : 1
   const HI = LITTLE_ENDIAN ? 1 : 0
+  const len = order?.length ?? n
 
-  let idx = new Uint32Array(n)
-  let keyLo = new Uint32Array(n)
-  let keyHi = new Uint32Array(n)
+  let idx = new Uint32Array(len)
+  let keyLo = new Uint32Array(len)
+  let keyHi = new Uint32Array(len)
   let m = 0
-  for (let i = 0; i < n; i++) {
-    if (nullBitmap && !isValid(nullBitmap, i)) continue
-    tmp[0] = data[i]!
+  for (let i = 0; i < len; i++) {
+    const row = order ? order[i]! : i
+    if (nullBitmap && !isValid(nullBitmap, row)) continue
+    tmp[0] = data[row]!
     let lo = tv[LO]!
     let hi = tv[HI]!
     // negative: flip everything; positive: flip the sign bit → unsigned order == numeric order
@@ -381,7 +387,7 @@ export function argsortNumeric(
       lo = ~lo >>> 0
       hi = ~hi >>> 0
     }
-    idx[m] = i
+    idx[m] = row
     keyLo[m] = lo
     keyHi[m] = hi
     m++
@@ -420,12 +426,68 @@ export function argsortNumeric(
     ;[keyHi, hi2] = [hi2, keyHi]
   }
 
-  if (m === n) return idx.length === n ? idx : idx.slice(0, n)
-  const out = new Uint32Array(n)
+  if (m === len) return idx.length === len ? idx : idx.slice(0, len)
+  const out = new Uint32Array(len)
   out.set(idx.subarray(0, m))
   let k = m
-  for (let i = 0; i < n; i++) if (nullBitmap && !isValid(nullBitmap, i)) out[k++] = i
+  for (let i = 0; i < len; i++) {
+    const row = order ? order[i]! : i
+    if (nullBitmap && !isValid(nullBitmap, row)) out[k++] = row
+  }
   return out
+}
+
+/**
+ * Map a column to numeric codes suitable for radix argsort (lexical order for text).
+ * Category codes are remapped via sorted(dictionary) ranks; utf8 gets dense ranks over uniques.
+ */
+export function sortKeyCodes(col: Column): { codes: NumArr; nullBitmap?: Uint8Array } | null {
+  const dtype = col.field.dtype
+  if (dtype === 'category' && col.dictionary) {
+    const dict = col.dictionary
+    const card = dict.length
+    const orderIdx = Array.from({ length: card }, (_, i) => i)
+    orderIdx.sort((a, b) => {
+      const sa = dict[a]!
+      const sb = dict[b]!
+      return sa < sb ? -1 : sa > sb ? 1 : 0
+    })
+    const rank = new Uint32Array(card)
+    for (let r = 0; r < card; r++) rank[orderIdx[r]!] = r
+    const src = col.data as Uint32Array
+    const n = src.length
+    const codes = new Uint32Array(n)
+    for (let i = 0; i < n; i++) {
+      const c = src[i]!
+      codes[i] = c < card ? rank[c]! : 0
+    }
+    return { codes, nullBitmap: col.nullBitmap }
+  }
+  if (dtype === 'utf8') {
+    const strings = col.data as string[]
+    const n = strings.length
+    const seen = new Map<string, number>()
+    const uniques: string[] = []
+    for (let i = 0; i < n; i++) {
+      if (col.nullBitmap && !isValid(col.nullBitmap, i)) continue
+      const s = strings[i] ?? ''
+      if (!seen.has(s)) {
+        seen.set(s, uniques.length)
+        uniques.push(s)
+      }
+    }
+    uniques.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    for (let i = 0; i < uniques.length; i++) seen.set(uniques[i]!, i)
+    const codes = new Uint32Array(n)
+    for (let i = 0; i < n; i++) {
+      if (col.nullBitmap && !isValid(col.nullBitmap, i)) continue
+      codes[i] = seen.get(strings[i] ?? '') ?? 0
+    }
+    return { codes, nullBitmap: col.nullBitmap }
+  }
+  const data = numericView(col)
+  if (!data) return null
+  return { codes: data, nullBitmap: col.nullBitmap }
 }
 
 export function tryFastSort(
@@ -433,21 +495,42 @@ export function tryFastSort(
   by: Array<{ expr: ExprNode; descending: boolean }>,
   limit?: number,
 ): TableView | null {
-  if (by.length !== 1 || by[0]!.expr.type !== 'col') return null
-  const col = getColumn(table, by[0]!.expr.name)
-  const data = numericView(col)
-  if (!data) return null
-  const descending = by[0]!.descending
-  const n = table.numRows
+  if (by.length === 0) return null
+  for (const k of by) if (k.expr.type !== 'col') return null
 
-  if (limit !== undefined && limit > 0 && limit < n) {
-    const idx = new Uint32Array(n)
-    for (let i = 0; i < n; i++) idx[i] = i
-    topKIndices(idx, data, col.nullBitmap, descending, limit)
-    return gather(table, idx.subarray(0, limit))
+  const keys: Array<{ codes: NumArr; nullBitmap?: Uint8Array; descending: boolean }> = []
+  for (const k of by) {
+    const col = getColumn(table, (k.expr as { type: 'col'; name: string }).name)
+    const sk = sortKeyCodes(col)
+    if (!sk) return null
+    keys.push({ codes: sk.codes, nullBitmap: sk.nullBitmap, descending: k.descending })
   }
 
-  return gather(table, argsortNumeric(data, n, col.nullBitmap, descending))
+  const n = table.numRows
+
+  // Top-k heap path: single numeric key only (existing behaviour).
+  if (limit !== undefined && limit > 0 && limit < n && by.length === 1) {
+    const col = getColumn(table, (by[0]!.expr as { type: 'col'; name: string }).name)
+    const data = numericView(col)
+    if (data) {
+      const idx = new Uint32Array(n)
+      for (let i = 0; i < n; i++) idx[i] = i
+      topKIndices(idx, data, col.nullBitmap, by[0]!.descending, limit)
+      return gather(table, idx.subarray(0, limit))
+    }
+  }
+
+  // Successive stable radix: last key first, then earlier keys.
+  let idx: Uint32Array | undefined
+  for (let k = keys.length - 1; k >= 0; k--) {
+    const key = keys[k]!
+    idx = argsortNumeric(key.codes, n, key.nullBitmap, key.descending, idx)
+  }
+  const final = idx!
+  if (limit !== undefined && limit > 0 && limit < n) {
+    return gather(table, final.subarray(0, limit))
+  }
+  return gather(table, final)
 }
 
 function topKIndices(
@@ -1275,6 +1358,141 @@ export function tryFastGroupBy(
   ])
 }
 
+function mergeAcc(into: Acc, from: Acc): void {
+  if (from.count === 0) return
+  if (into.count === 0) {
+    into.count = from.count
+    into.sum = from.sum
+    into.min = from.min
+    into.max = from.max
+    into.m2 = from.m2
+    if (from.values) into.values = from.values.slice()
+    return
+  }
+  const n1 = into.count
+  const n2 = from.count
+  const mean1 = into.sum / n1
+  const mean2 = from.sum / n2
+  const n = n1 + n2
+  into.m2 = into.m2 + from.m2 + ((mean1 - mean2) * (mean1 - mean2) * n1 * n2) / n
+  into.sum += from.sum
+  into.count = n
+  if (from.min < into.min) into.min = from.min
+  if (from.max > into.max) into.max = from.max
+  if (into.values && from.values) {
+    for (const v of from.values) into.values.push(v)
+  }
+}
+
+/**
+ * Chunked / one-pass groupBy under a memory budget: accumulate per-group stats without
+ * retaining every row index, merging partial maps across row batches.
+ */
+export function tryChunkedGroupBy(
+  table: TableView,
+  keys: string[],
+  aggs: Array<{ name: string; expr: ExprNode }>,
+  chunkRows: number,
+): TableView | null {
+  if (keys.length === 0) return null
+  const parsed = parseAggs(table, aggs)
+  if (!parsed) return null
+  const needVals = parsed.some((p) => needsValueList(p.op))
+  const keyCols = keys.map((k) => getColumn(table, k))
+  const global = new Map<string, Acc[]>()
+  const keySample = new Map<string, number>() // first row index for key materialization
+
+  const n = table.numRows
+  const step = Math.max(1, chunkRows)
+  for (let start = 0; start < n; start += step) {
+    const end = Math.min(n, start + step)
+    const local = new Map<string, Acc[]>()
+    for (let i = start; i < end; i++) {
+      let nullKey = false
+      const parts: string[] = []
+      for (const kc of keyCols) {
+        if (kc.nullBitmap && !isValid(kc.nullBitmap, i)) {
+          nullKey = true
+          parts.push('∅')
+        } else if (kc.field.dtype === 'category' && kc.dictionary) {
+          parts.push(kc.dictionary[Number((kc.data as Uint32Array)[i])] ?? '∅')
+        } else if (kc.field.dtype === 'utf8') {
+          parts.push(String((kc.data as string[])[i]))
+        } else {
+          const kd = numericView(kc)
+          if (!kd) return null
+          parts.push(String(kd[i]))
+        }
+      }
+      void nullKey
+      const key = parts.join('\0')
+      let accs = local.get(key)
+      if (!accs) {
+        accs = parsed.map((p) => freshAcc(needVals && needsValueList(p.op)))
+        local.set(key, accs)
+        if (!keySample.has(key)) keySample.set(key, i)
+      }
+      applyAggsAt(accs, parsed, i)
+    }
+    for (const [key, accs] of local) {
+      const g = global.get(key)
+      if (!g) {
+        global.set(key, accs)
+      } else {
+        for (let a = 0; a < accs.length; a++) mergeAcc(g[a]!, accs[a]!)
+      }
+    }
+  }
+
+  const size = global.size
+  const outCols: Column[] = []
+  for (let ki = 0; ki < keys.length; ki++) {
+    const src = keyCols[ki]!
+    const data = allocateData(src.field.dtype, size)
+    const nullBitmap = new Uint8Array(Math.ceil(size / 8) || 1)
+    let anyNull = false
+    let row = 0
+    for (const key of global.keys()) {
+      const srcIdx = keySample.get(key)!
+      if (!isValid(src.nullBitmap, srcIdx)) {
+        anyNull = true
+      } else {
+        setValid(nullBitmap, row, true)
+        if (src.field.dtype === 'utf8') {
+          ;(data as string[])[row] = (src.data as string[])[srcIdx]!
+        } else if (src.field.dtype === 'category') {
+          ;(data as Uint32Array)[row] = (src.data as Uint32Array)[srcIdx]!
+        } else {
+          const kd = numericView(src)!
+          ;(data as Float64Array | Int32Array | Uint32Array)[row] = kd[srcIdx]!
+        }
+      }
+      row++
+    }
+    outCols.push({
+      field: { ...src.field },
+      data,
+      nullBitmap: anyNull ? nullBitmap : undefined,
+      dictionary: src.dictionary ? [...src.dictionary] : undefined,
+    })
+  }
+
+  for (let a = 0; a < parsed.length; a++) {
+    const agg = parsed[a]!
+    const data = new Float64Array(size)
+    let row = 0
+    for (const accs of global.values()) {
+      data[row++] = finishAcc(accs[a]!, agg.op, agg.q ?? 0.5, agg.qm)
+    }
+    outCols.push({
+      field: { name: agg.name, dtype: 'f64', nullable: false },
+      data,
+    })
+  }
+
+  return tableFromColumns(outCols)
+}
+
 /**
  * Equi-join on one numeric key.
  * Dense Int32 probe + identity-left reuse + fused right gather (no extra index copy).
@@ -1693,14 +1911,17 @@ export function tryFastUnique(
     let kMax = -Infinity
     let valid = 0
     let nullRow = -1
+    let allInt = true
     for (let i = 0; i < n; i++) {
       if (bitmap && !isValid(bitmap, i)) {
-        if (nullRow < 0) nullRow = i
+        // Use === -1 (not < 0): keep:'none' marks duplicates as -2, which must not be reset.
+        if (nullRow === -1) nullRow = i
         else if (keep === 'last') nullRow = i
         else if (keep === 'none') nullRow = -2
         continue
       }
       const v = data[i]!
+      if (!Number.isInteger(v)) allInt = false
       if (v < kMin) kMin = v
       if (v > kMax) kMax = v
       valid++
@@ -1713,6 +1934,7 @@ export function tryFastUnique(
 
     const span = kMax - kMin + 1
     const useDense =
+      allInt &&
       Number.isFinite(kMin) &&
       Number.isInteger(kMin) &&
       Number.isInteger(kMax) &&
@@ -2813,6 +3035,53 @@ function applyStrOp(s: string, op: string, expr: Extract<ExprNode, { type: 'str'
   }
 }
 
+/** Collapse duplicate dictionary entries and remap codes (e.g. after toLowerCase merges "A"/"a"). */
+function canonicalizeCategory(
+  codes: Uint32Array,
+  dictionary: string[],
+  nullBitmap: Uint8Array | undefined,
+): { codes: Uint32Array; dictionary: string[] } {
+  const map = new Map<string, number>()
+  const newDict: string[] = []
+  const oldToNew = new Int32Array(dictionary.length)
+  for (let d = 0; d < dictionary.length; d++) {
+    const s = dictionary[d]!
+    let code = map.get(s)
+    if (code === undefined) {
+      code = newDict.length
+      newDict.push(s)
+      map.set(s, code)
+    }
+    oldToNew[d] = code
+  }
+  if (newDict.length === dictionary.length) {
+    // No collapse — keep original codes buffer when possible.
+    let same = true
+    for (let d = 0; d < dictionary.length; d++) {
+      if (oldToNew[d] !== d) {
+        same = false
+        break
+      }
+    }
+    if (same) return { codes, dictionary }
+  }
+  const n = codes.length
+  const remapped = new Uint32Array(n)
+  if (nullBitmap) {
+    for (let i = 0; i < n; i++) {
+      if (!isValid(nullBitmap, i)) continue
+      const c = codes[i]!
+      remapped[i] = c < oldToNew.length ? oldToNew[c]! : 0
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const c = codes[i]!
+      remapped[i] = c < oldToNew.length ? oldToNew[c]! : 0
+    }
+  }
+  return { codes: remapped, dictionary: newDict }
+}
+
 /** Category dict remap / utf8 typed loops for str.* column materialization. */
 function tryFastStrColumn(table: TableView, expr: Extract<ExprNode, { type: 'str' }>, name: string): Column | null {
   let inner = expr.expr
@@ -2829,11 +3098,12 @@ function tryFastStrColumn(table: TableView, expr: Extract<ExprNode, { type: 'str
 
     if (op === 'toLowerCase' || op === 'toUpperCase' || op === 'trim' || op === 'replace' || op === 'replaceAll' || op === 'slice') {
       const newDict = dict.map((s) => String(applyStrOp(s, op, expr)))
+      const canon = canonicalizeCategory(codes, newDict, bm)
       return {
         field: { name, dtype: 'category', nullable: col.field.nullable },
-        data: codes,
+        data: canon.codes,
         nullBitmap: bm,
-        dictionary: newDict,
+        dictionary: canon.dictionary,
       }
     }
     if (op === 'len') {
@@ -2858,11 +3128,12 @@ function tryFastStrColumn(table: TableView, expr: Extract<ExprNode, { type: 'str
     }
     if (op === 'split') {
       const newDict = dict.map((s) => String(applyStrOp(s, op, expr)))
+      const canon = canonicalizeCategory(codes, newDict, bm)
       return {
         field: { name, dtype: 'category', nullable: col.field.nullable },
-        data: codes,
+        data: canon.codes,
         nullBitmap: bm,
-        dictionary: newDict,
+        dictionary: canon.dictionary,
       }
     }
     return null

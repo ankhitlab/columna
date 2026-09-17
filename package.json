@@ -1,7 +1,7 @@
 {
   "name": "columna-monorepo",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Fluent DataFrame library for TypeScript with WASM and WebGPU backends",
   "repository": {
     "type": "git",
@@ -16,14 +16,16 @@
   "scripts": {
     "build": "pnpm -r run build",
     "test": "vitest run",
+    "test:stress": "vitest run packages/core/tests/stress-data.test.ts packages/core/tests/stress-csv.test.ts packages/runtime/tests/stress-spill.test.ts",
     "test:watch": "vitest",
     "lint": "eslint packages",
     "typecheck": "pnpm -r run typecheck",
+    "test:consumer": "node scripts/consumer-test.mjs",
+    "test:browser": "pnpm --filter @columna/browser-smoke run test:ci",
     "bench": "pnpm --filter @columna/bench run bench",
     "bench:compare": "pnpm --filter @columna/bench run compare",
     "bench:webgpu": "pnpm --filter @columna/bench run webgpu",
     "bench:stats": "pnpm --filter @columna/bench run stats && pnpm --filter @columna/bench run stats:pandas && pnpm --filter @columna/bench run stats:verify",
-    "studio": "pnpm --filter columna-studio dev",
     "clean": "pnpm -r run clean",
     "bench:compare:js": "pnpm --filter @columna/bench run compare:js",
     "bench:e2e": "pnpm --filter @columna/bench run e2e",

@@ -19,7 +19,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean --external pg --external mssql --external @clickhouse/client --external mysql2 --external better-sqlite3 --external kafkajs",
+    "build": "tsup",
     "clean": "rimraf dist",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json"
   },
@@ -29,6 +29,9 @@
     "hyparquet": "^1.30.0",
     "hyparquet-compressors": "^1.1.1",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "optionalDependencies": {
+    "@columna/native": "workspace:*"
   },
   "peerDependencies": {
     "@clickhouse/client": "^1.8.0",

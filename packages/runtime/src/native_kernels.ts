@@ -93,7 +93,7 @@ export async function tryLoadNativeKernels(): Promise<boolean> {
 export const NATIVE_FILTER_MIN_ROWS = 1_000_000
 
 /** Min take size before native gather is used for typed columns. */
-export const NATIVE_GATHER_MIN_ROWS = 250_000
+export const NATIVE_GATHER_MIN_ROWS = 50_000
 
 /** Min left rows for native dense join probe / semi. */
 export const NATIVE_JOIN_MIN_ROWS = 500_000

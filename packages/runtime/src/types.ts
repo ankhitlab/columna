@@ -272,6 +272,12 @@ export interface ExecutionReport {
   totalMs: number
   /** Distinct backends that executed at least one node. */
   backendsUsed: EngineKind[]
+  /** Bytes written to spill files during this execution (Node, when MemoryPolicy.spill is on). */
+  spilledBytes?: number
+  /** Peak estimated live table bytes observed during this execution. */
+  peakBytes?: number
+  /** True when `persist()` served the result from the LRU cache. */
+  cacheHit?: boolean
 }
 
 /** Per-execution context handed to backends: records events; `strict` forbids silent delegation. */
@@ -323,6 +329,8 @@ export interface RuntimeOptions {
    * `EngineStrictError` with the reasons instead of silently running elsewhere.
    */
   strict?: boolean
+  /** Soft memory budget / spill / persist cache (also settable via `setMemoryPolicy`). */
+  memory?: import('./memory.js').MemoryPolicy
 }
 
 export const DEFAULT_WEBGPU_MIN_ROWS = 10_000

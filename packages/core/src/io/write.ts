@@ -10,6 +10,8 @@ function needsCsvEscape(s: string): boolean {
 }
 
 function escapeCsv(s: string): string {
+  // "" for an empty string: the reader maps a bare empty field to null, a quoted one to "" (polars convention)
+  if (s === '') return '""'
   if (!needsCsvEscape(s)) return s
   return `"${s.replace(/"/g, '""')}"`
 }
@@ -104,68 +106,112 @@ function prepareWriter(col: Column, esc: (s: string) => string): ColWriter {
   return { kind: 'num', data, bm, dense, denseMin }
 }
 
-/** Cell strings for rows [start, end) of one column — only this window is materialised. */
-function cellsFor(w: ColWriter, start: number, end: number, esc: (s: string) => string): string[] {
-  const len = end - start
-  const out = new Array<string>(len)
+/** Cell string for a single row index — used by the row-wise CSV emitter. */
+function cellAt(w: ColWriter, i: number, esc: (s: string) => string): string {
   const bm = w.bm
+  if (bm && !isValid(bm, i)) return ''
   if (w.kind === 'utf8') {
-    const data = w.data
-    const cache = w.cache
-    for (let i = start; i < end; i++) {
-      if (bm && !isValid(bm, i)) {
-        out[i - start] = ''
-        continue
-      }
-      const s = data[i] ?? ''
-      let e = cache.get(s)
-      if (e === undefined) {
-        e = esc(s)
-        if (cache.size < 65_536) cache.set(s, e)
-      }
-      out[i - start] = e
+    const s = w.data[i] ?? ''
+    let e = w.cache.get(s)
+    if (e === undefined) {
+      e = esc(s)
+      if (w.cache.size < 65_536) w.cache.set(s, e)
     }
-    return out
+    return e
   }
-  if (w.kind === 'cat') {
-    const codes = w.codes
-    const escaped = w.escaped
-    for (let i = start; i < end; i++) out[i - start] = bm && !isValid(bm, i) ? '' : (escaped[codes[i]!] ?? '')
-    return out
+  if (w.kind === 'cat') return w.escaped[w.codes[i]!] ?? ''
+  if (w.kind === 'bool') return w.data[i] ? 'true' : 'false'
+  const v = w.data[i]!
+  if (w.dense && Number.isInteger(v)) {
+    const o = v - w.denseMin
+    if (o >= 0 && o < w.dense.length) return w.dense[o]!
   }
-  if (w.kind === 'bool') {
-    const data = w.data
-    for (let i = start; i < end; i++) out[i - start] = bm && !isValid(bm, i) ? '' : data[i] ? 'true' : 'false'
-    return out
-  }
-  const data = w.data
-  const dense = w.dense
-  const denseMin = w.denseMin
-  for (let i = start; i < end; i++) {
-    if (bm && !isValid(bm, i)) {
-      out[i - start] = ''
-      continue
-    }
-    const v = data[i]!
-    if (dense && Number.isInteger(v)) {
-      const o = v - denseMin
-      if (o >= 0 && o < dense.length) {
-        out[i - start] = dense[o]!
-        continue
-      }
-    }
-    if (v >= 0 && v < SMALL_INT_STR.length && Number.isInteger(v)) out[i - start] = SMALL_INT_STR[v]!
-    else out[i - start] = String(v)
-  }
-  return out
+  if (v >= 0 && v < SMALL_INT_STR.length && Number.isInteger(v)) return SMALL_INT_STR[v]!
+  return String(v)
 }
 
-/** Rows per emitted chunk: bounds the cell strings alive at once to ncols × CSV_CHUNK_ROWS. */
-export const CSV_CHUNK_ROWS = 16_384
+/** Rows per emitted chunk: bounds the working set alive at once. */
+export const CSV_CHUNK_ROWS = 32_768
+
+function needsQuoteInDict(s: string): boolean {
+  return needsCsvEscape(s)
+}
+
+/** True when every text/category value is free of `,` `"` CR LF (safe for native unquoted write). */
+function tableIsUnquotedSafe(table: TableView): boolean {
+  for (const col of table.columns) {
+    if (needsCsvEscape(col.field.name)) return false
+    const dtype = col.field.dtype
+    if (dtype === 'utf8') {
+      for (const s of col.data as string[]) {
+        if (needsQuoteInDict(s)) return false
+      }
+    } else if (dtype === 'category' && col.dictionary) {
+      for (const s of col.dictionary) {
+        if (needsQuoteInDict(s)) return false
+      }
+    }
+  }
+  return true
+}
+
+type NativeWriteCol = {
+  name: string
+  dtype: string
+  nullBitmap?: Uint8Array
+  f64Data?: Float64Array
+  i32Data?: Int32Array
+  boolData?: Uint8Array
+  catCodes?: Uint32Array
+  dictionary?: string[]
+  utf8Data?: string[]
+}
+
+function toNativeWriteColumns(table: TableView): NativeWriteCol[] {
+  return table.columns.map((c) => {
+    const dtype = c.field.dtype
+    const base: NativeWriteCol = { name: c.field.name, dtype, nullBitmap: c.nullBitmap }
+    if (dtype === 'i32') base.i32Data = c.data as Int32Array
+    else if (dtype === 'bool') base.boolData = c.data as Uint8Array
+    else if (dtype === 'category') {
+      base.catCodes = c.data as Uint32Array
+      base.dictionary = c.dictionary
+    } else if (dtype === 'utf8') base.utf8Data = c.data as string[]
+    else if (dtype === 'f32') {
+      const src = c.data as Float32Array
+      const f = new Float64Array(src.length)
+      for (let i = 0; i < src.length; i++) f[i] = src[i]!
+      base.dtype = 'f64'
+      base.f64Data = f
+    } else {
+      base.dtype = dtype === 'datetime' ? 'datetime' : 'f64'
+      base.f64Data = c.data as Float64Array
+    }
+    return base
+  })
+}
+
+async function tryWriteCsvNative(table: TableView, path: string, options: CsvWriteOptions): Promise<boolean> {
+  if (options.escapeFormulas) return false
+  if (!tableIsUnquotedSafe(table)) return false
+  try {
+    const id = '@columna/' + 'native'
+    const mod = (await import(/* webpackIgnore: true */ /* @vite-ignore */ id)) as {
+      isNativeLoaded?: boolean
+      writeCsvUnquoted?: (path: string, numRows: number, columns: NativeWriteCol[]) => void
+    }
+    if (!mod.isNativeLoaded || typeof mod.writeCsvUnquoted !== 'function') return false
+    mod.writeCsvUnquoted(path, table.numRows, toNativeWriteColumns(table))
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
- * Serialize a table to CSV as a sequence of chunks (header first, then blocks of rows). Only one block of
- * cell strings exists at a time, so `writeCsv(path)` streams with memory bounded by the chunk, not the table.
+ * Serialize a table to CSV as a sequence of chunks (header first, then blocks of rows). Cells are
+ * formatted row-wise (no ncols × chunk temporary string grid), so `writeCsv(path)` streams with memory
+ * bounded by the chunk, not the table.
  */
 export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {}): Generator<string, void, undefined> {
   const n = table.numRows
@@ -175,31 +221,95 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
   yield cols.map((c) => esc(c.field.name)).join(',')
   if (n === 0) return
   const writers = cols.map((c) => prepareWriter(c, esc))
+  const chunk = new Array<string>(CSV_CHUNK_ROWS)
   for (let start = 0; start < n; start += CSV_CHUNK_ROWS) {
     const end = Math.min(n, start + CSV_CHUNK_ROWS)
     const len = end - start
-    const cells = writers.map((w) => cellsFor(w, start, end, esc))
-    const chunk = new Array<string>(len)
     if (ncols === 1) {
-      const a = cells[0]!
-      for (let i = 0; i < len; i++) chunk[i] = a[i]!
+      const w0 = writers[0]!
+      for (let i = 0; i < len; i++) chunk[i] = cellAt(w0, start + i, esc)
     } else if (ncols === 2) {
-      const a = cells[0]!
-      const b = cells[1]!
-      for (let i = 0; i < len; i++) chunk[i] = `${a[i]!},${b[i]!}`
+      const w0 = writers[0]!
+      const w1 = writers[1]!
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)}`
+      }
     } else if (ncols === 3) {
-      const a = cells[0]!
-      const b = cells[1]!
-      const c = cells[2]!
-      for (let i = 0; i < len; i++) chunk[i] = `${a[i]!},${b[i]!},${c[i]!}`
+      const w0 = writers[0]!
+      const w1 = writers[1]!
+      const w2 = writers[2]!
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)}`
+      }
+    } else if (ncols === 4) {
+      const [w0, w1, w2, w3] = writers as [ColWriter, ColWriter, ColWriter, ColWriter]
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)}`
+      }
+    } else if (ncols === 5) {
+      const [w0, w1, w2, w3, w4] = writers as [ColWriter, ColWriter, ColWriter, ColWriter, ColWriter]
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] =
+          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)}`
+      }
+    } else if (ncols === 6) {
+      const [w0, w1, w2, w3, w4, w5] = writers as [
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+      ]
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] =
+          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)}`
+      }
+    } else if (ncols === 7) {
+      const [w0, w1, w2, w3, w4, w5, w6] = writers as [
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+      ]
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] =
+          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)},${cellAt(w6, r, esc)}`
+      }
+    } else if (ncols === 8) {
+      const [w0, w1, w2, w3, w4, w5, w6, w7] = writers as [
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+        ColWriter,
+      ]
+      for (let i = 0; i < len; i++) {
+        const r = start + i
+        chunk[i] =
+          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)},${cellAt(w6, r, esc)},${cellAt(w7, r, esc)}`
+      }
     } else {
       for (let i = 0; i < len; i++) {
-        let row = cells[0]![i]!
-        for (let c = 1; c < ncols; c++) row += `,${cells[c]![i]!}`
+        const r = start + i
+        let row = cellAt(writers[0]!, r, esc)
+        for (let c = 1; c < ncols; c++) row += `,${cellAt(writers[c]!, r, esc)}`
         chunk[i] = row
       }
     }
-    yield chunk.join('\n')
+    yield chunk.length === len ? chunk.join('\n') : chunk.slice(0, len).join('\n')
   }
 }
 
@@ -221,13 +331,26 @@ async function writeNodeFile(path: string, data: string | Uint8Array): Promise<v
  */
 export async function writeCsvText(table: TableView, path?: string, options: CsvWriteOptions = {}): Promise<string> {
   if (!path) return tableToCsv(table, options)
+  if (await tryWriteCsvNative(table, path, options)) return ''
   const fs = await import('node:fs')
   const out = fs.createWriteStream(path)
+  let rejectWrite: ((err: Error) => void) | null = null
+  const onError = (err: Error) => {
+    if (rejectWrite) rejectWrite(err)
+  }
+  out.on('error', onError)
   const write = (s: string) =>
     new Promise<void>((resolve, reject) => {
-      if (out.write(s)) resolve()
-      else out.once('drain', resolve)
-      out.once('error', reject)
+      rejectWrite = reject
+      if (out.write(s)) {
+        rejectWrite = null
+        resolve()
+      } else {
+        out.once('drain', () => {
+          rejectWrite = null
+          resolve()
+        })
+      }
     })
   try {
     let first = true
@@ -235,10 +358,19 @@ export async function writeCsvText(table: TableView, path?: string, options: Csv
       await write(first ? chunk : '\n' + chunk)
       first = false
     }
-    await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())))
+    await new Promise<void>((resolve, reject) => {
+      rejectWrite = reject
+      out.end((err?: Error | null) => {
+        rejectWrite = null
+        if (err) reject(err)
+        else resolve()
+      })
+    })
   } catch (err) {
     out.destroy()
     throw err
+  } finally {
+    out.off('error', onError)
   }
   return ''
 }

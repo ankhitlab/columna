@@ -129,7 +129,9 @@ out["onesided"] = {
                         "pValue": float({"two-sided": 2 * min(st.chi2.cdf((len(oa) - 1) * np.var(oa, ddof=1) / 1.44, len(oa) - 1), st.chi2.sf((len(oa) - 1) * np.var(oa, ddof=1) / 1.44, len(oa) - 1)),
                                          "less": st.chi2.cdf((len(oa) - 1) * np.var(oa, ddof=1) / 1.44, len(oa) - 1),
                                          "greater": st.chi2.sf((len(oa) - 1) * np.var(oa, ddof=1) / 1.44, len(oa) - 1)}[alt])} for alt in ALTS},
-    "poisson_rate_exact": {alt: {"pValue": float({"two-sided": min(1.0, 2 * min(st.poisson.cdf(37, 50 * 1.0), st.poisson.sf(36, 50 * 1.0))),
+    # two-sided exact Poisson p: 'minlike' (sum of outcomes no more likely than the observed one) — the convention of
+    # scipy.binomtest and Minitab's exact tests; the doubled-tail variant differs (0.0679 vs 0.0658 here)
+    "poisson_rate_exact": {alt: {"pValue": float({"two-sided": float(np.sum(st.poisson.pmf(np.arange(0, 400), 50.0)[st.poisson.pmf(np.arange(0, 400), 50.0) <= st.poisson.pmf(37, 50.0) * (1 + 1e-7)])),
                                                   "less": st.poisson.cdf(37, 50.0), "greater": st.poisson.sf(36, 50.0)}[alt])} for alt in ALTS},
 }
 

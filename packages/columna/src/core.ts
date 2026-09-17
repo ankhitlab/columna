@@ -1,4 +1,5 @@
-export { DataFrame, LazyFrame, GroupBy, Series, Expr, col, lit, aggExpr, dt, daysBetween } from '@columna/core'
+export { DataFrame, LazyFrame, GroupBy, Series, Expr, col, cols, lit, aggExpr, when, dt, daysBetween, openSqlClient, setIoPolicy, getIoPolicy, io } from '@columna/core'
+export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinResult, InferColumns, AnyExpr, ColRefs, DTypeValue, IoSource, ReadCsvOptions, ReadJsonOptions, ReadExcelOptions, ReadParquetOptions } from '@columna/core'
 export type { AggSpec } from '@columna/core'
 export type { ArrowLike, DType, Schema, TableView } from '@columna/arrow'
 export type { AggKind, EngineKind, JoinKind, PlanNode } from '@columna/runtime'

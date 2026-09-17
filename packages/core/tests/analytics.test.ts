@@ -165,6 +165,22 @@ describe('analytics', () => {
     expect(none.toArray()).toEqual([{ user_id: 3, v: 30 }])
   })
 
+  it('unique preserves fractional f64 between integer bounds', async () => {
+    const result = await DataFrame.fromColumns({
+      x: new Float64Array([0, 0.5, 1]),
+    })
+      .unique(['x'])
+      .collect()
+    expect(result.toArray()).toEqual([{ x: 0 }, { x: 0.5 }, { x: 1 }])
+  })
+
+  it('unique keep none drops all-null key column', async () => {
+    const result = await DataFrame.fromRows([{ x: null }, { x: null }, { x: null }])
+      .unique(['x'], 'none')
+      .collect()
+    expect(result.toArray()).toEqual([])
+  })
+
   it('describe quantiles for i32, fractional f64, and integral f64', async () => {
     const df = DataFrame.fromColumns({
       a: new Float64Array([1.5, 2.25, 3.75, 4.5, 10.125, -2.5, 0.5]),

@@ -70,7 +70,7 @@ describe('data integrity', () => {
     const safe = df.toCsv({ escapeFormulas: true }).split('\n')
     expect(safe[1]).toBe('"\'=HYPERLINK(""http://evil"",""click"")","\'+1","\'-cmd","\'@SUM(A1)","\'\tx","\'\rx",-5,plain')
     // only a *leading* trigger matters; inner characters and numbers are left alone
-    expect(safe[2]).toBe('Ada,a=b, -x,,x\ty,y,2,"\'="')
+    expect(safe[2]).toBe('Ada,a=b, -x,"",x\ty,y,2,"\'="') // an empty string is written as "" (a null would be an empty field)
     // header names are cells too
     const h = DataFrame.fromRows([{ '=cmd': 1 }]).toCsv({ escapeFormulas: true }).split('\n')[0]
     expect(h).toBe('"\'=cmd"')

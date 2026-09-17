@@ -38,6 +38,12 @@ export interface Distribution {
 const EPS = 1e-16
 const FPMIN = Number.MIN_VALUE / EPS
 const MAX_ITER = 1000
+/**
+ * Iteration budget for the incomplete gamma / beta series and continued fractions. Near the transition
+ * x ≈ a the series' ratio is x / (a + i) ≈ 1 and convergence needs O(√a) terms: at a = 10⁵ about 3 500,
+ * which a fixed cap of 1 000 silently truncated (Poisson sf at λ = 10⁵ was off by 2·10⁻⁷).
+ */
+const iterBudget = (scale: number) => Math.max(MAX_ITER, Math.ceil(60 * Math.sqrt(Math.max(1, scale))) + 200)
 const LN_SQRT_2PI = 0.9189385332046727 // ln √(2π)
 const SQRT2 = Math.SQRT2
 
@@ -79,7 +85,8 @@ function gammaSeries(a: number, x: number): number {
   let ap = a
   let sum = 1 / a
   let del = sum
-  for (let i = 0; i < MAX_ITER; i++) {
+  const budget = iterBudget(a)
+  for (let i = 0; i < budget; i++) {
     ap += 1
     del *= x / ap
     sum += del
@@ -94,7 +101,8 @@ function gammaCF(a: number, x: number): number {
   let c = 1 / FPMIN
   let d = 1 / b
   let h = d
-  for (let i = 1; i <= MAX_ITER; i++) {
+  const budget = iterBudget(a)
+  for (let i = 1; i <= budget; i++) {
     const an = -i * (i - a)
     b += 2
     d = an * d + b
@@ -416,15 +424,11 @@ export function beta(a: number, b: number): Distribution {
   const sf = (x: number) => (x <= 0 ? 1 : x >= 1 ? 0 : betainc(b, a, 1 - x))
   const ppf = (q: number) => {
     if (Number.isNaN(q) || q < 0 || q > 1) return NaN
-    let lo = 0
-    let hi = 1
-    for (let i = 0; i < 200; i++) {
-      const mid = 0.5 * (lo + hi)
-      if (cdf(mid) < q) lo = mid
-      else hi = mid
-      if (hi - lo < 1e-15) break
-    }
-    return 0.5 * (lo + hi)
+    if (q === 0) return 0
+    if (q === 1) return 1
+    // upper tail: invert the mirrored distribution so both tails get the log-space treatment
+    if (q > 0.5) return 1 - betaLowerPpf(b, a, 1 - q, lbeta)
+    return betaLowerPpf(a, b, q, lbeta)
   }
   const d: Distribution = {
     name: `beta(${a}, ${b})`,
@@ -439,6 +443,42 @@ export function beta(a: number, b: number): Distribution {
   }
   d.map = makeMap(d)
   return Object.freeze(d)
+}
+
+/**
+ * Lower-tail beta quantile. Bisection on log x reaches quantiles like 1e-115 (tiny shapes), which a linear
+ * bisection on [0, 1] cannot: its resolution floor is ~1e-16 and it returned that instead of the answer.
+ */
+function betaLowerPpf(a: number, b: number, q: number, lbeta: number): number {
+  const cdf = (x: number) => (x <= 0 ? 0 : x >= 1 ? 1 : betainc(a, b, x))
+  // leading-order guess x0 = (q · a · B(a, b))^(1/a); bracket it geometrically in log space
+  let lgx = (Math.log(q) + Math.log(a) + lbeta) / a
+  if (!Number.isFinite(lgx)) lgx = -1
+  let lo = Math.min(lgx - 2, -1)
+  let hi = 0
+  for (let i = 0; i < 2000 && cdf(Math.exp(lo)) >= q; i++) lo -= 2
+  for (let i = 0; i < 200; i++) {
+    const mid = 0.5 * (lo + hi)
+    if (cdf(Math.exp(mid)) < q) lo = mid
+    else hi = mid
+    if (hi - lo < 1e-15) break
+  }
+  let x = Math.exp(0.5 * (lo + hi))
+  // Newton polish on x with the pdf (guarded to the bracket)
+  const pdf = (v: number) => Math.exp((a - 1) * Math.log(v) + (b - 1) * Math.log1p(-v) - lbeta)
+  for (let k = 0; k < 30; k++) {
+    const fx = cdf(x) - q
+    const d = pdf(x)
+    if (!(d > 0) || !Number.isFinite(d)) break
+    const nx = x - fx / d
+    if (!(nx > Math.exp(lo) && nx < Math.exp(hi))) break
+    if (Math.abs(nx - x) <= 1e-16 * Math.abs(x)) {
+      x = nx
+      break
+    }
+    x = nx
+  }
+  return x
 }
 
 /** Gamma(shape k, scale θ). */

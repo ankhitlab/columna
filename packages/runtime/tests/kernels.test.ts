@@ -76,6 +76,58 @@ describe('tryFastSort / tryFastJoin', () => {
     expect([...(full!.columns[1]!.data as Float64Array).subarray(0, 3)]).toEqual([50, 40, 30])
   })
 
+  it('tryFastSort multi-key category + f64 matches lexical order with per-key descending', () => {
+    // dictionary order is insertion order (Rome, Berlin, Paris) — sort must use lexical labels
+    const table = tableFromColumns([
+      {
+        field: { name: 'city', dtype: 'category', nullable: false },
+        data: new Uint32Array([0, 1, 2, 0, 1]),
+        dictionary: ['Rome', 'Berlin', 'Paris'],
+      },
+      { field: { name: 'salary', dtype: 'f64', nullable: false }, data: new Float64Array([30, 10, 20, 40, 50]) },
+      { field: { name: 'id', dtype: 'i32', nullable: false }, data: new Int32Array([0, 1, 2, 3, 4]) },
+    ])
+    const by = [
+      { expr: { type: 'col' as const, name: 'city' }, descending: false },
+      { expr: { type: 'col' as const, name: 'salary' }, descending: true },
+    ]
+    const sorted = tryFastSort(table, by)
+    expect(sorted).not.toBeNull()
+    // Berlin(50), Berlin(10), Paris(20), Rome(40), Rome(30)
+    expect([...(sorted!.columns[2]!.data as Int32Array)]).toEqual([4, 1, 2, 3, 0])
+    expect([...(sorted!.columns[1]!.data as Float64Array)]).toEqual([50, 10, 20, 40, 30])
+  })
+
+  it('tryFastSort multi-key utf8 + nulls last', () => {
+    // bits set = valid: rows 0,1,3,4 (row 2 null)
+    const nullBitmap = new Uint8Array([0b11011])
+    const table = tableFromColumns([
+      {
+        field: { name: 'city', dtype: 'utf8', nullable: true },
+        data: ['b', 'a', 'z', 'a', 'b'],
+        nullBitmap,
+      },
+      { field: { name: 'v', dtype: 'i32', nullable: false }, data: new Int32Array([1, 2, 9, 3, 0]) },
+    ])
+    const by = [
+      { expr: { type: 'col' as const, name: 'city' }, descending: false },
+      { expr: { type: 'col' as const, name: 'v' }, descending: false },
+    ]
+    const sorted = tryFastSort(table, by)
+    expect(sorted).not.toBeNull()
+    // a/2, a/3, b/0, b/1, then null city (z row)
+    expect([...(sorted!.columns[1]!.data as Int32Array)]).toEqual([2, 3, 0, 1, 9])
+  })
+
+  it('argsortNumeric successive pass (order) is stable', () => {
+    const primary = new Float64Array([1, 2, 1, 2])
+    const secondary = new Float64Array([10, 20, 30, 5])
+    // sort secondary asc, then primary asc → (1,10), (1,30), (2,5), (2,20) → indices 0,2,3,1
+    const bySec = argsortNumeric(secondary, 4, undefined, false)
+    const byBoth = argsortNumeric(primary, 4, undefined, false, bySec)
+    expect(Array.from(byBoth)).toEqual([0, 2, 3, 1])
+  })
+
   it('tryFastJoin dense and sparse probes', () => {
     const leftDense = tableFromColumns([
       { field: { name: 'user_id', dtype: 'i32', nullable: false }, data: new Int32Array([0, 1, 2]) },

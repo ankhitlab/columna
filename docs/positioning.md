@@ -2,15 +2,15 @@
 
 "Fluent API, runs in JS" describes Arquero as well as columna, and DuckDB-Wasm and Polars both have JavaScript
 interfaces. This page states the actual trade-offs, with numbers from `pnpm bench:compare:js`
-([comparison-js.md](comparison-js.md): same 2M-row file, same five operations, results cross-checked to be identical).
+([comparison-js.md](comparison-js.md): same 2M-row file, 24 operations, results cross-checked to be identical).
 
 ## The alternatives, by scenario
 
 | Scenario | Strongest option | Where columna stands |
 |---|---|---|
-| Table transformations directly in JS (browser or Node), no native binary, no WASM heap | **Arquero** or **columna** | Same operation set. On 2M rows columna is 5–10× faster per operation (filter 34 vs 160 ms, groupBy 32 vs 171, sort 199 vs 1512, join 43 vs 408) and holds ~3× less memory (728 vs 2211 MB peak) because columns are typed arrays rather than JS arrays; Arquero reads CSV faster (1.8 vs 3.2 s) and has a larger ecosystem (Vega, Observable). |
-| SQL analytics and Parquet in the browser | **DuckDB-Wasm** | It is a real query engine: optimiser, SQL, Parquet/Arrow natively, 2.5× faster CSV read (0.8 vs 3.2 s), faster sort. Cost: a 5–10 MB WASM bundle, a separate heap (1.1 GB peak here), SQL as the interface. columna's per-op speed is comparable (filter 34 vs 159 ms, groupBy 32 vs 33, join 43 vs 38) with a ~150 kB core and no SQL. |
-| Heavy tabular processing outside the browser | **Polars** (`nodejs-polars`) or **DuckDB** (native) | Not a contest: native multi-threaded cores run the whole pipeline in 0.3–0.7 s where columna needs 4.3 s, with a query optimiser and streaming execution. If the workload is server-side and a native binary is acceptable, use them. columna's role there is the statistics layer (below), not the bulk engine. |
+| Table transformations directly in JS (browser or Node), no native binary, no WASM heap | **Arquero** or **columna** | Same operation set. On 2M rows columna is typically several× faster per transform (filter 30 vs 182 ms, groupBy 31 vs 170, sort 182 vs 1906, sortMulti 233 vs 2707, unique 182 vs 297, join 45 vs 388) and holds ~3× less memory (1084 vs 3525 MB peak) because columns are typed arrays rather than JS arrays; Arquero has a larger ecosystem (Vega, Observable). |
+| SQL analytics and Parquet in the browser | **DuckDB-Wasm** | It is a real query engine: optimiser, SQL, Parquet/Arrow natively, CSV read is in the same ballpark here (~0.9 vs 0.3 s with columna's optional native Rayon path). Cost: a 5–10 MB WASM bundle, a separate heap (~1.9 GB peak here), SQL as the interface. columna's per-op speed is comparable on filter/groupBy/join with a ~150 kB core and no SQL. |
+| Heavy tabular processing outside the browser | **Polars** (`nodejs-polars`) or **DuckDB** (native) | Native multi-threaded cores still win on some ops, but on this 24-op suite columna's warm total (~1.7 s) is competitive with Polars eager (~2.4 s) when `@columna/native` is present; DuckDB remains fastest (~1.2 s). If the workload is server-side and a full SQL/streaming optimiser is required, prefer them. columna's distinct role is the statistics layer (below). |
 
 Measured on one Windows x64 machine, Node 24; single process per library; multi-threaded engines use every core, the
 three JS-side libraries use one. Cold numbers (module load + first run) are in the linked report.
@@ -44,7 +44,7 @@ three JS-side libraries use one. Cold numbers (module load + first run) are in t
 - **Arrow interop is a JSON-shaped `ArrowLike`, not Arrow IPC.** Zero-copy exchange with DuckDB-Wasm or
   Arrow-based tools is not available; conversion goes through JavaScript values.
 - **No SQL.** Everything is method chains and expressions.
-- **Scale ceiling is process memory.** 100M × 8 f64 = 6.4 GB of buffers; nothing spills to disk.
+- **Scale ceiling is process memory by default.** On Node you can set a soft budget (`MemoryPolicy.maxBytes`) so sort / unique / join / groupBy spill intermediates to disk instead of growing without bound; the browser has no spill path.
 
 ## Choosing
 

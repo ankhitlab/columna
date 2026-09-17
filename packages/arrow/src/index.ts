@@ -360,6 +360,59 @@ export function columnLength(column: Column): number {
   return column.data.length
 }
 
+/** Bytes per numeric/bool element for size estimates (utf8/category handled separately). */
+function dtypeElementBytes(dtype: DType): number {
+  switch (dtype) {
+    case 'f64':
+    case 'datetime':
+      return 8
+    case 'f32':
+    case 'i32':
+    case 'u32':
+      return 4
+    case 'bool':
+    case 'category':
+      return 1
+    case 'utf8':
+      return 0
+  }
+}
+
+/**
+ * Rough live footprint of a column: typed buffer + null bitmap + dictionary/utf8 string payloads
+ * (UTF-16 code units × 2, plus a small per-string overhead).
+ */
+export function estimateColumnBytes(column: Column): number {
+  const n = columnLength(column)
+  let bytes = 64
+  if (column.nullBitmap) bytes += column.nullBitmap.byteLength
+  if (column.field.dtype === 'utf8') {
+    const data = column.data as string[]
+    bytes += n * 24
+    for (let i = 0; i < n; i++) {
+      const s = data[i]
+      if (s != null) bytes += s.length * 2
+    }
+  } else if (column.field.dtype === 'category') {
+    bytes += n * dtypeElementBytes('category')
+    if (column.dictionary) {
+      bytes += column.dictionary.length * 24
+      for (const s of column.dictionary) bytes += s.length * 2
+    }
+  } else {
+    const data = column.data as ArrayBufferView
+    bytes += data.byteLength || n * dtypeElementBytes(column.field.dtype)
+  }
+  return bytes
+}
+
+/** Rough live footprint of a table (sum of columns + schema overhead). */
+export function estimateTableBytes(table: TableView): number {
+  let bytes = 128 + table.schema.length * 48
+  for (const col of table.columns) bytes += estimateColumnBytes(col)
+  return bytes
+}
+
 export function cloneColumn(column: Column, indices?: number[]): Column {
   if (!indices) {
     return {
@@ -489,6 +542,13 @@ export function setRowField(row: Record<string, unknown>, name: string, value: u
   else row[name] = value
 }
 
+/** Read a cell from a row object: only own properties (missing `constructor` must not become Object). */
+export function getRowField(row: Record<string, unknown>, name: string): unknown {
+  if (!Object.hasOwn(row, name)) return undefined
+  if (name === '__proto__') return Object.getOwnPropertyDescriptor(row, name)?.value
+  return row[name]
+}
+
 export function toRowObjects(table: TableView): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = []
   for (let i = 0; i < table.numRows; i++) {
@@ -504,7 +564,8 @@ export function toRowObjects(table: TableView): Record<string, unknown>[] {
       else if (col.field.dtype === 'category' && col.dictionary) {
         setRowField(row, name, col.dictionary[Number(raw)] ?? null)
       } else if (col.field.dtype === 'datetime') {
-        setRowField(row, name, new Date(Number(raw)))
+        // Epoch milliseconds — matches InferColumns / DTypeValue, not Date objects.
+        setRowField(row, name, Number(raw))
       } else setRowField(row, name, raw)
     }
     rows.push(row)

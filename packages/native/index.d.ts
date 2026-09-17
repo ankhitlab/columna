@@ -29,3 +29,39 @@ export declare function groupbySumsF64(codes: Uint32Array, card: number, cols: A
 export declare function strContains(values: Array<string>, needle: string): Uint8Array
 /** Parallel ASCII/Unicode lower — returns new strings (for utf8 materialize). */
 export declare function strToLower(values: Array<string>): Array<string>
+export interface NativeCsvColumn {
+  name: string
+  /** "i32" | "f64" | "bool" | "category" | "utf8" */
+  dtype: string
+  nullBitmap?: Uint8Array
+  f64Data?: Float64Array
+  i32Data?: Int32Array
+  boolData?: Uint8Array
+  catCodes?: Uint32Array
+  dictionary?: Array<string>
+  utf8Data?: Array<string>
+}
+export interface NativeCsvTable {
+  numRows: number
+  columns: Array<NativeCsvColumn>
+}
+/** Column payload for native CSV write (mirrors NativeCsvColumn). */
+export interface NativeCsvWriteColumn {
+  name: string
+  dtype: string
+  nullBitmap?: Uint8Array
+  f64Data?: Float64Array
+  i32Data?: Int32Array
+  boolData?: Uint8Array
+  catCodes?: Uint32Array
+  dictionary?: Array<string>
+  utf8Data?: Array<string>
+}
+/**
+ * Fast path: unquoted CSV bytes → columnar table (Rayon over row chunks). Matches the JS fused
+ * reader for default locale (`,` / `.`, no custom null/bool tokens). Returns `null` columns empty
+ * on empty input.
+ */
+export declare function parseCsvUnquoted(bytes: Buffer, delimiter: number, hasHeader: boolean): NativeCsvTable
+/** Write an unquoted CSV to `path`. Caller must ensure no cell needs quoting (no `,`/`"`/CRLF in text). */
+export declare function writeCsvUnquoted(path: string, numRows: number, columns: Array<NativeCsvWriteColumn>): void

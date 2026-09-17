@@ -1,6 +1,7 @@
 import {
   allocateData,
   cloneColumn,
+  estimateTableBytes,
   getColumn,
   getField,
   getValue,
@@ -37,7 +38,14 @@ import {
   tryFastSort,
   tryFastUnique,
   tryFusedFilterGroupBy,
+  tryChunkedGroupBy,
+  gather,
 } from './fast.js'
+import { memoryBudget, recordLiveBytes } from './memory.js'
+import { externalSortTable, joinTablesSpilled, needsSpill, uniqueTableSpilled } from './spill_ops.js'
+import { spillRead, spillUnlink, spillWrite } from './spill.js'
+import { createFilterView, ensureMaterialized } from './views.js'
+import { pushdownProjections } from './pushdown.js'
 import { parallelDualGtIndices, parallelTakeTable } from './parallel.js'
 import {
   asofJoinTables,
@@ -829,6 +837,7 @@ function materializeExprColumn(table: TableView, expr: ExprNode, name: string): 
 // Columns are immutable once built: every writer allocates a fresh buffer, so
 // pass-through outputs share the input buffers instead of copying them.
 function project(table: TableView, columns: Array<string | ExprNode>): TableView {
+  table = ensureMaterialized(table)
   const out: Column[] = []
   for (const c of columns) {
     if (typeof c === 'string') {
@@ -848,6 +857,7 @@ function project(table: TableView, columns: Array<string | ExprNode>): TableView
 }
 
 function filterTable(table: TableView, predicate: ExprNode, keep?: readonly string[]): TableView {
+  table = ensureMaterialized(table)
   const b = broadcastAggregates(predicate, table)
   if (b.table !== table) {
     // over() temps live only in b.table: evaluate there, but keep the caller's columns
@@ -861,7 +871,8 @@ function filterTable(table: TableView, predicate: ExprNode, keep?: readonly stri
   for (let i = 0; i < table.numRows; i++) {
     if (evalExprScalar(predicate, table, i)) indices.push(i)
   }
-  return takeTable(table, indices, keep)
+  // Defer gather: share column buffers until sort/join/unique/mutate materializes.
+  return createFilterView(table, Uint32Array.from(indices), keep)
 }
 
 function sortTable(
@@ -869,6 +880,7 @@ function sortTable(
   by: Array<{ expr: ExprNode; descending: boolean }>,
   limit?: number,
 ): TableView {
+  table = ensureMaterialized(table)
   let extended = false
   by = by.map((k) => {
     const b = broadcastAggregates(k.expr, table)
@@ -879,13 +891,47 @@ function sortTable(
     return b.expr === k.expr ? k : { ...k, expr: b.expr }
   })
   if (extended) return stripTemps(sortTable(table, by, limit))
+  if (needsSpill(table)) {
+    return externalSortTable(table, by, limit, sortTableInMemory, evalExprScalar)
+  }
+  return sortTableInMemory(table, by, limit)
+}
+
+function sortTableInMemory(
+  table: TableView,
+  by: Array<{ expr: ExprNode; descending: boolean }>,
+  limit?: number,
+): TableView {
   const fast = tryFastSort(table, by, limit)
   if (fast) return fast
-  const indices = Array.from({ length: table.numRows }, (_, i) => i)
+  const n = table.numRows
+  const indices = new Uint32Array(n)
+  for (let i = 0; i < n; i++) indices[i] = i
+
+  // Prefetch column keys for bare col exprs to avoid evalExprScalar per comparison.
+  type KeyFn = (row: number) => number | string | boolean | null
+  const keyFns: Array<{ at: KeyFn; descending: boolean }> = by.map((key) => {
+    if (key.expr.type === 'col') {
+      const col = getColumn(table, key.expr.name)
+      const dtype = col.field.dtype
+      const at: KeyFn = (row) => {
+        if (!isValid(col.nullBitmap, row)) return null
+        const v = getValue(col.data, row)
+        if (dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? null
+        return v as number | string | boolean
+      }
+      return { at, descending: key.descending }
+    }
+    return {
+      at: (row) => evalExprScalar(key.expr, table, row),
+      descending: key.descending,
+    }
+  })
+
   indices.sort((a, b) => {
-    for (const key of by) {
-      const va = evalExprScalar(key.expr, table, a)
-      const vb = evalExprScalar(key.expr, table, b)
+    for (const key of keyFns) {
+      const va = key.at(a)
+      const vb = key.at(b)
       if (va === vb) continue
       if (va === null) return 1
       if (vb === null) return -1
@@ -894,8 +940,8 @@ function sortTable(
     }
     return 0
   })
-  const sliced = limit !== undefined ? indices.slice(0, limit) : indices
-  return tableFromColumns(table.columns.map((c) => takeColumn(c, sliced)))
+  const sliced = limit !== undefined ? indices.subarray(0, Math.min(limit, n)) : indices
+  return gather(table, sliced)
 }
 
 function groupByTable(
@@ -903,9 +949,24 @@ function groupByTable(
   keys: string[],
   aggs: Array<{ name: string; expr: ExprNode }>,
 ): TableView {
+  table = ensureMaterialized(table)
   if (keys.length === 0) throw new Error('groupBy requires at least one key')
+  if (needsSpill(table)) {
+    const budget = memoryBudget() ?? 1
+    const chunkRows = Math.max(1, Math.floor(table.numRows / Math.max(2, Math.ceil(estimateTableBytes(table) / budget))))
+    const chunked = tryChunkedGroupBy(table, keys, aggs, chunkRows)
+    if (chunked) return chunked
+  }
   const fast = tryFastGroupBy(table, keys, aggs)
   if (fast) return fast
+  return groupByTableSlow(table, keys, aggs)
+}
+
+function groupByTableSlow(
+  table: TableView,
+  keys: string[],
+  aggs: Array<{ name: string; expr: ExprNode }>,
+): TableView {
   const groups = new Map<string, number[]>()
   for (let i = 0; i < table.numRows; i++) {
     const parts = keys.map((k) => {
@@ -966,12 +1027,12 @@ function groupByTable(
     const nullBitmap = new Uint8Array(Math.ceil(values.length / 8) || 1)
     for (let i = 0; i < values.length; i++) {
       const v = values[i]
-      if (v === null || v === undefined) {
+      if (v === null) {
         anyNull = true
-        continue
+      } else {
+        setValid(nullBitmap, i, true)
+        setValue(data, i, v, dtype)
       }
-      setValid(nullBitmap, i, true)
-      setValue(data, i, v, dtype)
     }
     outCols.push({
       field: { name: agg.name, dtype, nullable: anyNull },
@@ -1126,6 +1187,41 @@ function joinTables(
   rightOn: string[],
   how: JoinKind,
 ): TableView {
+  left = ensureMaterialized(left)
+  right = ensureMaterialized(right)
+  if (how === 'cross') return crossJoinTables(left, right)
+
+  const working = estimateTableBytes(left) + estimateTableBytes(right)
+  recordLiveBytes(working)
+  if (needsSpill(left) || needsSpill(right) || (memoryBudgetSafe() && working * 2 > memoryBudgetSafe()!)) {
+    if (how === 'inner') {
+      return joinTablesSpilled(left, right, (l, r) => joinTablesInMemory(l, r, leftOn, rightOn, how))
+    }
+    // Non-inner: spill the larger side to account for budget, then join in memory after reload.
+    const spillTarget = estimateTableBytes(right) >= estimateTableBytes(left) ? right : left
+    const path = spillWrite(spillTarget)
+    try {
+      const reloaded = spillRead(path)
+      if (spillTarget === right) return joinTablesInMemory(left, reloaded, leftOn, rightOn, how)
+      return joinTablesInMemory(reloaded, right, leftOn, rightOn, how)
+    } finally {
+      spillUnlink(path)
+    }
+  }
+  return joinTablesInMemory(left, right, leftOn, rightOn, how)
+}
+
+function memoryBudgetSafe(): number | undefined {
+  return memoryBudget()
+}
+
+function joinTablesInMemory(
+  left: TableView,
+  right: TableView,
+  leftOn: string[],
+  rightOn: string[],
+  how: JoinKind,
+): TableView {
   if (how === 'cross') return crossJoinTables(left, right)
 
   if (how === 'inner' || how === 'left' || how === 'right' || how === 'outer' || how === 'semi' || how === 'anti') {
@@ -1162,10 +1258,10 @@ function joinTables(
     const k = joinKey(left, leftOn, i)
     const hits = rightIndex.get(k)
     if (hits && hits.length) {
-      for (const r of hits) {
+      for (const j of hits) {
         leftIdx.push(i)
-        rightIdx.push(r)
-        matchedRight.add(r)
+        rightIdx.push(j)
+        matchedRight.add(j)
       }
     } else if (how === 'left' || how === 'outer') {
       leftIdx.push(i)
@@ -1174,10 +1270,10 @@ function joinTables(
   }
 
   if (how === 'right' || how === 'outer') {
-    for (let r = 0; r < right.numRows; r++) {
-      if (!matchedRight.has(r)) {
+    for (let j = 0; j < right.numRows; j++) {
+      if (!matchedRight.has(j)) {
         leftIdx.push(-1)
-        rightIdx.push(r)
+        rightIdx.push(j)
       }
     }
   }
@@ -1673,6 +1769,14 @@ function valueCounts(table: TableView, column: string, normalize: boolean): Tabl
 }
 
 function uniqueTable(table: TableView, columns: string[] | undefined, keep: 'first' | 'last' | 'none'): TableView {
+  table = ensureMaterialized(table)
+  if (needsSpill(table)) {
+    return uniqueTableSpilled(table, (chunk) => uniqueTableInMemory(chunk, columns, keep))
+  }
+  return uniqueTableInMemory(table, columns, keep)
+}
+
+function uniqueTableInMemory(table: TableView, columns: string[] | undefined, keep: 'first' | 'last' | 'none'): TableView {
   const fast = tryFastUnique(table, columns, keep)
   if (fast) return fast
   const cols = columns ?? table.schema.map((f) => f.name)
@@ -1989,6 +2093,11 @@ function pivotTable(
 }
 
 export function executeCpu(plan: PlanNode): TableView {
+  plan = pushdownProjections(plan)
+  return ensureMaterialized(executeCpuNode(plan))
+}
+
+function executeCpuNode(plan: PlanNode): TableView {
   switch (plan.type) {
     case 'scan':
       return plan.table
@@ -1997,45 +2106,45 @@ export function executeCpu(plan: PlanNode): TableView {
       if (plan.input.type === 'filter') {
         const names = projectColumnNames(plan.columns)
         if (names) {
-          const base = executeCpu(plan.input.input)
+          const base = executeCpuNode(plan.input.input)
           const filtered = filterTable(base, plan.input.predicate, names)
           // If projection is exactly those columns in order, skip re-project when possible
-          return project(filtered, plan.columns)
+          return project(ensureMaterialized(filtered), plan.columns)
         }
       }
-      return project(executeCpu(plan.input), plan.columns)
+      return project(ensureMaterialized(executeCpuNode(plan.input)), plan.columns)
     }
     case 'filter':
-      return filterTable(executeCpu(plan.input), plan.predicate)
+      return filterTable(executeCpuNode(plan.input), plan.predicate)
     case 'sort':
-      return sortTable(executeCpu(plan.input), plan.by)
+      return sortTable(executeCpuNode(plan.input), plan.by)
     case 'limit': {
       // Fuse sort + limit into top-k when possible
       if (plan.input.type === 'sort' && (plan.offset ?? 0) === 0) {
-        const sorted = sortTable(executeCpu(plan.input.input), plan.input.by, plan.n)
+        const sorted = sortTable(executeCpuNode(plan.input.input), plan.input.by, plan.n)
         return sorted
       }
-      const t = executeCpu(plan.input)
+      const t = ensureMaterialized(executeCpuNode(plan.input))
       const start = plan.offset ?? 0
       const end = Math.min(t.numRows, Math.max(0, start) + Math.max(0, plan.n))
       return sliceTable(t, Math.max(0, start), end)
     }
     case 'withColumn': {
-      const t = executeCpu(plan.input)
+      const t = ensureMaterialized(executeCpuNode(plan.input))
       const col = materializeExprColumn(t, plan.expr, plan.name)
       const others = t.columns.filter((c) => c.field.name !== plan.name)
       return tableFromColumns([...others, col])
     }
     case 'withColumns': {
-      const t = executeCpu(plan.input)
+      const t = ensureMaterialized(executeCpuNode(plan.input))
       return withColumnsTable(t, plan.columns, materializeExprColumn)
     }
     case 'drop': {
-      const t = executeCpu(plan.input)
+      const t = ensureMaterialized(executeCpuNode(plan.input))
       return tableFromColumns(t.columns.filter((c) => !plan.columns.includes(c.field.name)))
     }
     case 'rename': {
-      const t = executeCpu(plan.input)
+      const t = ensureMaterialized(executeCpuNode(plan.input))
       for (const from of Object.keys(plan.mapping)) getField(t.schema, from)
       const renamed = t.columns.map((c) => {
         const name = Object.hasOwn(plan.mapping, c.field.name) ? plan.mapping[c.field.name]! : c.field.name
@@ -2051,29 +2160,29 @@ export function executeCpu(plan: PlanNode): TableView {
     case 'groupBy': {
       // Fuse filter → groupBy (lazy collect style) — avoids materializing filtered rows.
       if (plan.input.type === 'filter') {
-        const base = executeCpu(plan.input.input)
+        const base = executeCpuNode(plan.input.input)
         const fused = tryFusedFilterGroupBy(base, plan.input.predicate, plan.keys, plan.aggs)
         if (fused) return fused
       }
-      return groupByTable(executeCpu(plan.input), plan.keys, plan.aggs)
+      return groupByTable(executeCpuNode(plan.input), plan.keys, plan.aggs)
     }
     case 'join':
-      return joinTables(executeCpu(plan.left), executeCpu(plan.right), plan.leftOn, plan.rightOn, plan.how)
+      return joinTables(executeCpuNode(plan.left), executeCpuNode(plan.right), plan.leftOn, plan.rightOn, plan.how)
     case 'fillNull':
-      return fillNullTable(executeCpu(plan.input), plan.value, plan.columns)
+      return fillNullTable(executeCpuNode(plan.input), plan.value, plan.columns)
     case 'dropNull':
-      return dropNullTable(executeCpu(plan.input), plan.columns)
+      return dropNullTable(executeCpuNode(plan.input), plan.columns)
     case 'melt':
-      return meltTable(executeCpu(plan.input), plan.idVars, plan.valueVars, plan.varName, plan.valueName)
+      return meltTable(executeCpuNode(plan.input), plan.idVars, plan.valueVars, plan.varName, plan.valueName)
     case 'pivot':
-      return pivotTable(executeCpu(plan.input), plan.index, plan.columns, plan.values, plan.agg)
+      return pivotTable(executeCpuNode(plan.input), plan.index, plan.columns, plan.values, plan.agg)
     case 'concat':
       return plan.how === 'vertical'
         ? concatVertical(plan.frames.map(executeCpu))
-        : tableFromColumns(plan.frames.flatMap((f) => executeCpu(f).columns))
+        : tableFromColumns(plan.frames.flatMap((f) => executeCpuNode(f).columns))
     case 'window':
       return windowTable(
-        executeCpu(plan.input),
+        executeCpuNode(plan.input),
         plan.name,
         plan.fn,
         plan.expr,
@@ -2083,17 +2192,17 @@ export function executeCpu(plan: PlanNode): TableView {
         plan.method ?? 'average',
       )
     case 'rolling':
-      return rollingTable(executeCpu(plan.input), plan.name, plan.column, plan.window, plan.agg)
+      return rollingTable(executeCpuNode(plan.input), plan.name, plan.column, plan.window, plan.agg)
     case 'expanding':
-      return expandingTable(executeCpu(plan.input), plan.name, plan.column, plan.agg, aggregateValues)
+      return expandingTable(executeCpuNode(plan.input), plan.name, plan.column, plan.agg, aggregateValues)
     case 'slice': {
-      const t = executeCpu(plan.input)
+      const t = executeCpuNode(plan.input)
       const start = plan.start < 0 ? Math.max(0, t.numRows + plan.start) : plan.start
       const end = plan.end === undefined ? t.numRows : plan.end < 0 ? t.numRows + plan.end : plan.end
       return sliceTable(t, start, end)
     }
     case 'take': {
-      const t = executeCpu(plan.input)
+      const t = executeCpuNode(plan.input)
       for (const i of plan.indices) {
         if (!Number.isInteger(i) || i < 0 || i >= t.numRows) {
           throw new RangeError(`take: index ${i} out of range for ${t.numRows} rows`)
@@ -2102,31 +2211,31 @@ export function executeCpu(plan: PlanNode): TableView {
       return tableFromColumns(t.columns.map((c) => takeColumn(c, plan.indices)))
     }
     case 'sample':
-      return sampleTable(executeCpu(plan.input), plan)
+      return sampleTable(executeCpuNode(plan.input), plan)
     case 'explode':
-      return explodeTable(executeCpu(plan.input), plan.column)
+      return explodeTable(executeCpuNode(plan.input), plan.column)
     case 'unnest':
-      return unnestTable(executeCpu(plan.input), plan.column, plan.separator)
+      return unnestTable(executeCpuNode(plan.input), plan.column, plan.separator)
     case 'transpose':
-      return transposeTable(executeCpu(plan.input), plan.headerColumn)
+      return transposeTable(executeCpuNode(plan.input), plan.headerColumn)
     case 'interpolate':
-      return interpolateTable(executeCpu(plan.input), plan.columns)
+      return interpolateTable(executeCpuNode(plan.input), plan.columns)
     case 'asofJoin':
       return asofJoinTables(
-        executeCpu(plan.left),
-        executeCpu(plan.right),
+        executeCpuNode(plan.left),
+        executeCpuNode(plan.right),
         plan.leftOn,
         plan.rightOn,
         plan.strategy,
       )
     case 'unique':
-      return uniqueTable(executeCpu(plan.input), plan.columns, plan.keep)
+      return uniqueTable(executeCpuNode(plan.input), plan.columns, plan.keep)
     case 'valueCounts':
-      return valueCounts(executeCpu(plan.input), plan.column, plan.normalize)
+      return valueCounts(executeCpuNode(plan.input), plan.column, plan.normalize)
     case 'describe':
-      return describeTable(executeCpu(plan.input), plan.quantileMethod)
+      return describeTable(executeCpuNode(plan.input), plan.quantileMethod)
     case 'corr':
-      return corrTable(executeCpu(plan.input), plan.kind, plan.method, plan.columns)
+      return corrTable(executeCpuNode(plan.input), plan.kind, plan.method, plan.columns)
   }
 }
 
@@ -2153,17 +2262,17 @@ export class CpuBackend implements Backend {
     }
     // B: parallel dual-gt + typed gather (helpers no-op to sync below thresholds)
     if (plan.type === 'filter') {
-      const input = executeCpu(plan.input)
+      const input = executeCpuNode(plan.input)
       const dual = matchDualGtFilter(input, plan.predicate)
       if (dual) {
         const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)
         return done(await parallelTakeTable(input, idx), input.numRows >= PARALLEL_MIN_ROWS ? 'workers:dualFilter' : isNativeKernelsLoaded() && input.numRows >= NATIVE_FILTER_MIN_ROWS ? 'native:dualFilter' : 'js:dualFilter')
       }
-      return done(filterTable(input, plan.predicate))
+      return done(ensureMaterialized(filterTable(input, plan.predicate)))
     }
     if (plan.type === 'project' && plan.input.type === 'filter') {
       const names = projectColumnNames(plan.columns)
-      const input = executeCpu(plan.input.input)
+      const input = executeCpuNode(plan.input.input)
       const dual = matchDualGtFilter(input, plan.input.predicate)
       if (names && dual) {
         const idx = await parallelDualGtIndices(dual.a, dual.b, dual.la, dual.lb)

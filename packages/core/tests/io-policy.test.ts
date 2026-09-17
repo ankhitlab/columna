@@ -100,10 +100,32 @@ describe('URL policy', () => {
 
   it('denyPrivateHosts refuses loopback / private / metadata names without touching the network', async () => {
     const never = (() => { throw new Error('must not fetch') }) as never
-    for (const host of ['127.0.0.1', 'localhost', '10.1.2.3', '192.168.0.1', '172.16.5.5', '169.254.169.254', '[::1]', 'metadata.google.internal', 'app.localhost']) {
+    for (const host of [
+      '127.0.0.1',
+      'localhost',
+      '10.1.2.3',
+      '192.168.0.1',
+      '172.16.5.5',
+      '169.254.169.254',
+      '[::1]',
+      '[::ffff:127.0.0.1]',
+      '[::ffff:7f00:1]',
+      'metadata.google.internal',
+      'app.localhost',
+    ]) {
       await expect(loadBytes(`http://${host}/x`, { denyPrivateHosts: true, fetch: never })).rejects.toThrow(/private|loopback|link-local/)
     }
     await expect(loadBytes('ftp://example.com/x', { mode: 'url' })).rejects.toThrow(/protocol "ftp:"/)
+  })
+
+  it('isDeniedPrivateHost recognises IPv4-mapped IPv6 literals', async () => {
+    const { isDeniedPrivateHost } = await import('../src/io/source.js')
+    expect(isDeniedPrivateHost('127.0.0.1')).toBe(true)
+    expect(isDeniedPrivateHost('[::ffff:127.0.0.1]')).toBe(true)
+    expect(isDeniedPrivateHost('::ffff:7f00:1')).toBe(true)
+    expect(isDeniedPrivateHost('[::1]')).toBe(true)
+    expect(isDeniedPrivateHost('8.8.8.8')).toBe(false)
+    expect(isDeniedPrivateHost('example.com')).toBe(false)
   })
 
   it('every redirect hop is checked; allowed redirects still work', async () => {

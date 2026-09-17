@@ -5,8 +5,12 @@ on:
     branches: [main, master]
   pull_request:
 
+# pnpm's version comes from package.json "packageManager" only — a second declaration here made
+# pnpm/action-setup fail before any test ran (run 35142143370).
+
 jobs:
   check:
+    name: lint · test · build · typecheck (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -15,13 +19,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        # version comes from package.json "packageManager"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
-      - run: pnpm test
       - run: pnpm build
+      # includes the type-level schema tests (tsc over tests/schema-types.test.ts)
       - run: pnpm typecheck
+      - run: pnpm test
+
+  consumer:
+    name: packed tarballs in a clean npm project (ESM · CJS · subpaths · types)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: node scripts/consumer-test.mjs
+
+  browser:
+    name: built bundle in headless Chromium (CPU path; WebGPU when an adapter exists)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm --filter @columna/browser-smoke exec playwright install --with-deps chromium
+      - run: pnpm --filter @columna/browser-smoke run test:ci
+
+  windows:
+    name: test on windows (node 22)
+    runs-on: windows-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test

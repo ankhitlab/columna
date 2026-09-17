@@ -1,6 +1,16 @@
 import type { TableView } from '@columna/arrow'
 import { CpuBackend } from './cpu.js'
 import {
+  getExecMemoryStats,
+  getMemoryPolicy,
+  resetExecMemoryStats,
+  setMemoryPolicy,
+  withMemoryPolicyAsync,
+  type MemoryPolicy,
+} from './memory.js'
+import { ensureSpillSupport } from './spill.js'
+import { lookupPersistCache, maybeStorePersist, type PersistLookup } from './persist.js'
+import {
   DEFAULT_WASM_MIN_ROWS,
   DEFAULT_WEBGPU_MIN_ROWS,
   EngineStrictError,
@@ -17,7 +27,7 @@ import {
 
 export class Runtime {
   private backends = new Map<EngineKind, Backend>()
-  private options: Required<RuntimeOptions>
+  private options: Required<Omit<RuntimeOptions, 'memory'>> & { memory?: MemoryPolicy }
 
   constructor(options: RuntimeOptions = {}) {
     this.options = {
@@ -26,8 +36,10 @@ export class Runtime {
       wasmMinRows: options.wasmMinRows ?? DEFAULT_WASM_MIN_ROWS,
       preferGpu: options.preferGpu ?? true,
       strict: options.strict ?? false,
+      memory: options.memory,
     }
     this.register(new CpuBackend())
+    if (options.memory) setMemoryPolicy(options.memory)
   }
 
   register(backend: Backend): void {
@@ -38,9 +50,18 @@ export class Runtime {
     this.options.engine = engine
   }
 
+  setMemoryPolicy(policy: MemoryPolicy): void {
+    this.options.memory = policy
+    setMemoryPolicy(policy)
+  }
+
   /** Immutable-ish fork with a forced engine (does not mutate this instance). */
   withEngine(engine: EngineKind, options: { strict?: boolean } = {}): Runtime {
-    const rt = new Runtime({ ...this.options, engine, strict: options.strict ?? this.options.strict })
+    const rt = new Runtime({
+      ...this.options,
+      engine,
+      strict: options.strict ?? this.options.strict,
+    })
     for (const backend of this.backends.values()) {
       if (backend.name !== 'cpu') rt.register(backend)
     }
@@ -79,15 +100,46 @@ export class Runtime {
     return this.backends.get('cpu')!
   }
 
-  async execute(plan: PlanNode): Promise<TableView> {
-    return (await this.executeWithReport(plan)).table
+  async execute(plan: PlanNode, opts?: { memory?: MemoryPolicy }): Promise<TableView> {
+    return (await this.executeWithReport(plan, opts)).table
   }
 
   /**
    * Execute and return what actually ran: per-node backend, kernels, fallback reasons and timings.
    * In strict mode a plan whose requested engine executed no node throws `EngineStrictError`.
    */
-  async executeWithReport(plan: PlanNode): Promise<{ table: TableView; report: ExecutionReport }> {
+  async executeWithReport(
+    plan: PlanNode,
+    opts?: { memory?: MemoryPolicy },
+  ): Promise<{ table: TableView; report: ExecutionReport }> {
+    const memory = opts?.memory ?? this.options.memory
+    if (memory?.maxBytes || getMemoryPolicy().maxBytes) await ensureSpillSupport()
+    return withMemoryPolicyAsync(memory, async () => {
+      resetExecMemoryStats()
+      const cached = lookupPersistCache(plan)
+      if (cached) {
+        const mem = getExecMemoryStats()
+        return {
+          table: cached.table,
+          report: {
+            requested: this.options.engine,
+            dispatched: 'cpu',
+            strict: this.options.strict,
+            events: [],
+            fallbacks: [],
+            totalMs: 0,
+            backendsUsed: ['cpu'],
+            spilledBytes: mem.spilledBytes,
+            peakBytes: mem.peakBytes,
+            cacheHit: true,
+          },
+        }
+      }
+      return this.executeWithReportInner(plan)
+    })
+  }
+
+  private async executeWithReportInner(plan: PlanNode): Promise<{ table: TableView; report: ExecutionReport }> {
     const requested = this.options.engine
     const strict = this.options.strict
     const backend = this.chooseBackend(plan)
@@ -97,7 +149,20 @@ export class Runtime {
     const t0 = now()
     const finish = (table: TableView, dispatched: EngineKind): { table: TableView; report: ExecutionReport } => {
       const backendsUsed = [...new Set(events.map((e) => e.backend))]
-      const report: ExecutionReport = { requested, dispatched, strict, events, fallbacks, totalMs: now() - t0, backendsUsed }
+      const mem = getExecMemoryStats()
+      maybeStorePersist(plan, table)
+      const report: ExecutionReport = {
+        requested,
+        dispatched,
+        strict,
+        events,
+        fallbacks,
+        totalMs: now() - t0,
+        backendsUsed,
+        spilledBytes: mem.spilledBytes,
+        peakBytes: mem.peakBytes,
+        cacheHit: false,
+      }
       if (strict && requested !== 'auto' && requested !== 'cpu' && !backendsUsed.includes(requested)) {
         const reasons = [
           ...fallbacks.map((f) => `${f.from} → ${f.to}: ${f.reason}`),
@@ -152,4 +217,20 @@ export function setDefaultRuntime(runtime: Runtime): void {
 
 export * from './types.js'
 export * from './cpu.js'
+export {
+  setMemoryPolicy,
+  getMemoryPolicy,
+  clearMemoryPolicy,
+  estimateTableBytes,
+} from './memory_api.js'
+export type { MemoryPolicy } from './memory.js'
+export {
+  hashPlan,
+  storePersistCache,
+  dropPersistCache,
+  clearPersistCache,
+  persistCacheStats,
+  markPlanPersist,
+  unmarkPlanPersist,
+} from './persist.js'
 export { tryLoadNativeKernels, isNativeKernelsLoaded, setNativeKernels, NATIVE_FILTER_MIN_ROWS } from './native_kernels.js'

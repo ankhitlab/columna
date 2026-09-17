@@ -2,6 +2,7 @@ import {
   allocateData,
   encodeCategory,
   fromArrowLike,
+  getRowField,
   getValue,
   inferDtype,
   inferDtypeFromValues,
@@ -25,10 +26,13 @@ import {
   type ExecutionReport,
   type ExprNode,
   type JoinKind,
+  type MemoryPolicy,
   type PlanNode,
   type QuantileMethod,
   type RankMethod,
   type Runtime,
+  markPlanPersist,
+  unmarkPlanPersist,
 } from '@columna/runtime'
 import { Expr, col, lit, when, type AnyExpr, type ColRefs } from './expr.js'
 import {
@@ -481,8 +485,8 @@ export class LazyFrame<S extends Row = Row> {
     })
   }
 
-  async collect(): Promise<DataFrame<S>> {
-    const table = await this.runtime.execute(this.plan)
+  async collect(opts?: { memory?: MemoryPolicy }): Promise<DataFrame<S>> {
+    const table = await this.runtime.execute(this.plan, opts)
     return new DataFrame<S>(table, this.runtime)
   }
 
@@ -491,9 +495,24 @@ export class LazyFrame<S extends Row = Row> {
    * GPU), why a node fell back to the CPU, and timings (for GPU nodes transfer vs. compute, plus the CPU
    * gather). Use it for benchmarks — "engine('wasm')" is a request, the report is the fact.
    */
-  async collectWithReport(): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
-    const { table, report } = await this.runtime.executeWithReport(this.plan)
+  async collectWithReport(opts?: { memory?: MemoryPolicy }): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+    const { table, report } = await this.runtime.executeWithReport(this.plan, opts)
     return { frame: new DataFrame<S>(table, this.runtime), report }
+  }
+
+  /**
+   * Mark this plan for LRU caching: the next `collect` materializes and stores the table; subsequent
+   * collects of an identical plan return the cached table (`report.cacheHit`).
+   */
+  persist(): this {
+    markPlanPersist(this.plan)
+    return this
+  }
+
+  /** Drop a previously persisted plan from the LRU cache. */
+  unpersist(): this {
+    unmarkPlanPersist(this.plan)
+    return this
   }
 
   async toArray(): Promise<S[]> {
@@ -848,12 +867,20 @@ export class DataFrame<S extends Row = Row> {
   explain(): string {
     return this.lazy().explain()
   }
-  collectWithReport(): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
-    return this.lazy().collectWithReport()
+  collectWithReport(opts?: { memory?: MemoryPolicy }): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+    return this.lazy().collectWithReport(opts)
   }
 
   collect(): Promise<DataFrame<S>> {
     return Promise.resolve(this)
+  }
+
+  persist(): LazyFrame<S> {
+    return this.lazy().persist()
+  }
+
+  unpersist(): LazyFrame<S> {
+    return this.lazy().unpersist()
   }
 
   /** Rows as objects, typed by the schema. */
@@ -893,7 +920,7 @@ export class DataFrame<S extends Row = Row> {
     // Infer dtypes from the full column (not a 256-row sample) so late floats/strings
     // cannot be silently coerced into a wrong integer/utf8 layout.
     const dtypes: DType[] = names.map((name) =>
-      inferDtypeFromValues(n, (i) => rows[i]![name]),
+      inferDtypeFromValues(n, (i) => getRowField(rows[i]! as Record<string, unknown>, name)),
     )
 
     const columns: Column[] = names.map((name, ci) => {
@@ -906,7 +933,7 @@ export class DataFrame<S extends Row = Row> {
         let anyNull = false
         const nullBitmap = new Uint8Array(Math.ceil(n / 8) || 1)
         for (let i = 0; i < n; i++) {
-          const v = rows[i]![name]
+          const v = getRowField(rows[i]! as Record<string, unknown>, name)
           if (v === null || v === undefined) {
             anyNull = true
             codes[i] = 0
@@ -947,7 +974,7 @@ export class DataFrame<S extends Row = Row> {
       let anyNull = false
       const nullBitmap = new Uint8Array(Math.ceil(n / 8) || 1)
       for (let i = 0; i < n; i++) {
-        const v = rows[i]![name]
+        const v = getRowField(rows[i]! as Record<string, unknown>, name)
         if (v === null || v === undefined) {
           anyNull = true
           continue

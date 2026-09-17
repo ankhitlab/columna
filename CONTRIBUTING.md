@@ -21,9 +21,10 @@ pnpm install
 |---|---|
 | `pnpm build` | Build all workspace packages |
 | `pnpm test` | Run the Vitest suite |
+| `pnpm test:stress` | Adversarial load / identity tests (set `STRESS_HEAVY=1` for ~10× rows) |
 | `pnpm lint` | ESLint over `packages/` |
 | `pnpm typecheck` | TypeScript `--noEmit` in packages that define it |
-| `pnpm studio` | Run Columna Studio (Vite) for manual UI checks |
+| `pnpm bench:compare:js` | Refresh `docs/comparison-js.md` (2M-row cross-library suite) |
 
 Filter a single package when useful, for example:
 

@@ -26,6 +26,8 @@ export default defineConfig({
     // Sibling modules required by runtime dynamic imports after bundling.
     'parallel-node': '../runtime/src/parallel-node.ts',
     'filter-worker': '../runtime/src/filter-worker.ts',
+    'csv-worker': '../core/src/io/csv-worker.ts',
+    'csv-parallel': '../core/src/io/csv-parallel.ts',
   },
   format: ['esm', 'cjs'],
   dts: {

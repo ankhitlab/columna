@@ -17,6 +17,13 @@ import { dualGtIndices } from './fast.js'
 /** Dual-gt via worker_threads — IPC usually loses; keep threshold very high. */
 export const PARALLEL_MIN_ROWS = 50_000_000
 
+/** Opaque specifier: bundlers must not inline the worker_threads module into browser builds. */
+async function loadParallelNode(): Promise<typeof import('./parallel-node.js')> {
+  if (typeof process === 'undefined' || !process.versions?.node) throw new Error('worker threads need Node')
+  const id = './parallel-node.js'
+  return (await import(/* @vite-ignore */ id)) as typeof import('./parallel-node.js')
+}
+
 /** Parallel typed gather via workers — only for huge takes. */
 export const PARALLEL_GATHER_MIN_ROWS = 2_000_000
 
@@ -44,7 +51,7 @@ export async function parallelDualGtIndices(
   }
 
   try {
-    const mod = await import(/* @vite-ignore */ './parallel-node.js')
+    const mod = await loadParallelNode()
     return await mod.runParallelDualGt(a, b, la, lb)
   } catch {
     return dualGtIndices(a, b, la, lb)
@@ -124,7 +131,7 @@ export async function parallelTakeTable(
       : Uint32Array.from({ length: n }, (_, i) => indices[i] as number)
 
   try {
-    const mod = await import(/* @vite-ignore */ './parallel-node.js')
+    const mod = await loadParallelNode()
     const outs = new Map<Column, NumArr | Uint8Array>()
     const specs = typed.map((col) => {
       const out = allocLike(col, n)
