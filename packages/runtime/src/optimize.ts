@@ -26,21 +26,24 @@ function combineAnd(parts: ExprNode[]): ExprNode | null {
   return acc
 }
 
-/** True if expr tree contains mapElements or over (do not push such predicates). */
+/**
+ * True if expr must not be merged/pushed past filters or withColumn.
+ * Barriers: mapElements, over, whole-column aggregates, and row-position ops (shift/offset).
+ */
 export function exprBlocksPushdown(expr: ExprNode): boolean {
   switch (expr.type) {
     case 'mapElements':
     case 'over':
+    case 'agg':
+    case 'rowOffset':
       return true
     case 'alias':
     case 'cast':
     case 'fillNull':
-    case 'agg':
     case 'unary':
     case 'dt':
     case 'clip':
     case 'str':
-    case 'rowOffset':
     case 'isIn':
       return exprBlocksPushdown(expr.expr)
     case 'isBetween':
@@ -280,6 +283,9 @@ function filterIntoJoin(plan: PlanNode): PlanNode {
   if (exprBlocksPushdown(plan.predicate)) return plan
 
   const join = plan.input
+  // Outer joins invent nulls on the non-preserved side; filters on that side must stay post-join.
+  const canPushLeft = join.how === 'inner' || join.how === 'left'
+  const canPushRight = join.how === 'inner' || join.how === 'right'
   const leftCols = planOutputColumns(join.left) ?? leafColumnNames(join.left)
   const rightCols = planOutputColumns(join.right) ?? leafColumnNames(join.right)
   const rSuffix = join.rSuffix ?? '_right'
@@ -332,9 +338,11 @@ function filterIntoJoin(plan: PlanNode): PlanNode {
       continue
     }
     if (sides.has('left')) {
-      leftParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'left')))
+      if (canPushLeft) leftParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'left')))
+      else topParts.push(conj)
     } else if (sides.has('right')) {
-      rightParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'right')))
+      if (canPushRight) rightParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'right')))
+      else topParts.push(conj)
     } else topParts.push(conj)
   }
 
@@ -605,19 +613,31 @@ function collectInnerJoinGraph(plan: PlanNode): JoinGraph | null {
       const rightIds = walk(p.right)
       if (!leftIds || !rightIds) return null
 
-      // Map each join key to a leaf that owns that column name
+      // Merge all key components between the same leaf pair into one equi-edge.
+      // Splitting them into separate edges would drop composite-key conjuncts on rebuild.
+      const edgeByPair = new Map<string, JoinEdge>()
       for (let k = 0; k < p.leftOn.length; k++) {
         const lk = p.leftOn[k]!
         const rk = p.rightOn[k]!
         const leftLeaf = findLeafWithColumn(leaves, leftIds, lk)
         const rightLeaf = findLeafWithColumn(leaves, rightIds, rk)
         if (leftLeaf === null || rightLeaf === null) return null
-        edges.push({
-          leftLeaf,
-          rightLeaf,
-          leftOn: [lk],
-          rightOn: [rk],
-        })
+        const pairKey =
+          leftLeaf < rightLeaf ? `${leftLeaf}:${rightLeaf}` : `${rightLeaf}:${leftLeaf}`
+        let edge = edgeByPair.get(pairKey)
+        if (!edge) {
+          edge = { leftLeaf, rightLeaf, leftOn: [], rightOn: [] }
+          edgeByPair.set(pairKey, edge)
+          edges.push(edge)
+        }
+        if (edge.leftLeaf === leftLeaf && edge.rightLeaf === rightLeaf) {
+          edge.leftOn.push(lk)
+          edge.rightOn.push(rk)
+        } else {
+          // Edge was oriented the other way; keep orientation, swap this component.
+          edge.leftOn.push(rk)
+          edge.rightOn.push(lk)
+        }
       }
       const all = new Set<number>()
       for (const id of leftIds) all.add(id)
@@ -698,6 +718,17 @@ function swapInnerJoinBuildSide(plan: PlanNode): PlanNode {
   if (rightN <= leftN) return plan
   if (leftN === 0 || rightN / Math.max(leftN, 1) < 1.25) return plan
 
+  // Bare names come from the left; colliding right cols get rSuffix. Swapping sides
+  // would invert provenance under the same names — skip when non-key names overlap.
+  const leftCols = planOutputColumns(plan.left) ?? leafColumnNames(plan.left)
+  const rightCols = planOutputColumns(plan.right) ?? leafColumnNames(plan.right)
+  const leftKeySet = new Set(plan.leftOn)
+  const rightKeySet = new Set(plan.rightOn)
+  for (const name of leftCols) {
+    if (leftKeySet.has(name) && rightKeySet.has(name)) continue
+    if (rightCols.has(name)) return plan
+  }
+
   const swapped: JoinNode = {
     type: 'join',
     left: plan.right,
@@ -727,6 +758,10 @@ function reorderInnerJoinGraph(plan: PlanNode): PlanNode {
   }
 
   const { leaves, edges, lSuffix, rSuffix } = graph
+  // Same provenance hazard as swapInnerJoinBuildSide: do not reorder when bare/_suffix
+  // names would flip under a side swap.
+  if (leavesHaveAmbiguousCollisions(leaves, edges)) return plan
+
   const n = leaves.length
   const ranked = leaves
     .map((leaf, i) => ({ i, rows: estimatePlanRows(leaf) }))
@@ -831,6 +866,24 @@ function findEdge(edges: JoinEdge[], a: number, b: number): JoinEdge | null {
   return null
 }
 
+/**
+ * True when an equi-edge connects leaves that also share a non-key column name.
+ * Reordering/swapping that edge's sides would invert bare vs suffixed provenance.
+ */
+function leavesHaveAmbiguousCollisions(leaves: PlanNode[], edges: JoinEdge[]): boolean {
+  const colSets = leaves.map((l) => planOutputColumns(l) ?? leafColumnNames(l))
+  for (const edge of edges) {
+    const leftCols = colSets[edge.leftLeaf]!
+    const rightCols = colSets[edge.rightLeaf]!
+    const keys = new Set<string>([...edge.leftOn, ...edge.rightOn])
+    for (const name of leftCols) {
+      if (keys.has(name)) continue
+      if (rightCols.has(name)) return true
+    }
+  }
+  return false
+}
+
 function findEdgeToSet(edges: JoinEdge[], leaf: number, used: Set<number>): JoinEdge | null {
   for (const e of edges) {
     if (e.leftLeaf === leaf && used.has(e.rightLeaf)) return e
@@ -865,6 +918,13 @@ function reorderSameKeyChainFallback(plan: PlanNode): PlanNode {
 
   const leaves = flatten(plan)
   if (!leaves || leaves.length < 3) return plan
+
+  // Same-key chain still swaps leaf order; skip when non-key names collide.
+  const syntheticEdges: JoinEdge[] = []
+  for (let i = 0; i < leaves.length - 1; i++) {
+    syntheticEdges.push({ leftLeaf: i, rightLeaf: i + 1, leftOn: [key], rightOn: [key] })
+  }
+  if (leavesHaveAmbiguousCollisions(leaves, syntheticEdges)) return plan
 
   const ranked = leaves
     .map((leaf, i) => ({ leaf, i, rows: estimatePlanRows(leaf) }))

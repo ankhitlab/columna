@@ -333,8 +333,11 @@ describe('optimizePlan rules', () => {
     }
     const viaPush = pushdownProjections(plan)
     const viaOpt = optimizePlan(plan)
-    expect(viaPush.type).toBe('sort')
-    expect(viaOpt.type).toBe('sort')
+    // Projection wraps sort so sort-only columns are not exposed in the output schema.
+    expect(viaPush.type).toBe('project')
+    expect(viaOpt.type).toBe('project')
+    if (viaPush.type === 'project') expect(viaPush.input.type).toBe('sort')
+    if (viaOpt.type === 'project') expect(viaOpt.input.type).toBe('sort')
   })
 })
 

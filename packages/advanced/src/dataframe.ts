@@ -65,16 +65,50 @@ void bonettTest
 
 export type MannWhitneyOptions = { alternative?: Alternative; confidence?: number; method?: 'auto' | 'exact' | 'asymptotic' }
 
-export type DataFramePropTestOptions = {
-  /** Denominator column (summed with `eventsCol` for one sample, or per group for two samples). Required without `by`. */
-  trials?: string
-  /** Exactly two levels → two-sample test on aggregated events / trials per level. */
-  by?: string
+/** One-sample 1 Proportion (`propTest1`): requires `trials`, no `by`. */
+export type DataFramePropTest1Options = {
+  /** Denominator column (summed with `eventsCol`). */
+  trials: string
+  by?: undefined
   p0?: number
   alternative?: Alternative
   confidence?: number
-  method?: 'exact' | 'normal' | 'fisher'
+  /** Exact binomial (default) or normal / Wald. */
+  method?: 'exact' | 'normal'
+}
+
+/** Two-sample 2 Proportions (`propTest2`): requires `by` with exactly two levels. */
+export type DataFramePropTest2Options = {
+  /** Exactly two levels → two-sample test on aggregated events / trials per level. */
+  by: string
+  /** Optional denominator column; without it a binary `eventsCol` is treated as 0/1 Bernoulli. */
+  trials?: string
+  alternative?: Alternative
+  confidence?: number
+  /** Pooled z (default via `normal`) or Fisher's exact. */
+  method?: 'normal' | 'fisher'
   pooled?: boolean
+}
+
+export type DataFramePropTestOptions = DataFramePropTest1Options | DataFramePropTest2Options
+
+function isPropTest2Options(options: DataFramePropTestOptions): options is DataFramePropTest2Options {
+  return typeof (options as DataFramePropTest2Options).by === 'string'
+}
+
+/**
+ * ANCOVA factor column → labels accepted by `ancova`.
+ * Policy: keep `string` / `number`; keep nulls; coerce `boolean` to `"true"` / `"false"`
+ * (stable string levels — never pass raw booleans into the model).
+ */
+function asAncovaGroups(
+  values: Array<number | string | boolean | null>,
+): Array<string | number | null> {
+  return values.map((v) => {
+    if (v === null) return null
+    if (typeof v === 'boolean') return v ? 'true' : 'false'
+    return v
+  })
 }
 
 /** Column-based t-test: one-sample by default, two-sample with `by` (a 2-level column), paired with `paired`. */
@@ -343,7 +377,7 @@ declare module '@columna/core' {
      * 1 or 2 Proportions: without `by`, sums `eventsCol` and `trials` for propTest1; with `by` (2 levels),
      * aggregates per group (binary column or events + trials columns) for propTest2.
      */
-    propTest(eventsCol: string, options?: DataFramePropTestOptions): PropTestResult
+    propTest(eventsCol: string, options: DataFramePropTestOptions): PropTestResult
     /** Augmented Dickey–Fuller unit-root test on a series column. */
     adfTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' | 'n' }): UnitRootResult
     /** KPSS stationarity test on a series column. */
@@ -451,7 +485,7 @@ declare module '@columna/core' {
     manovaModel(responses: string[], rhs: string, options?: { factors?: string[] }): Promise<import('./manova.js').ManovaModelResult>
     crossValidate(y: string, predictors: string[], options: { model: ModelKind; task?: 'regression' | 'classification'; folds?: number; seed?: number; nTrees?: number }): Promise<import('./automl.js').CvResult>
     autoModel(y: string, predictors: string[], options?: { task?: 'regression' | 'classification'; folds?: number; seed?: number; models?: ModelKind[]; nTrees?: number }): Promise<import('./automl.js').AutoModelResult>
-    propTest(eventsCol: string, options?: DataFramePropTestOptions): Promise<PropTestResult>
+    propTest(eventsCol: string, options: DataFramePropTestOptions): Promise<PropTestResult>
     adfTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' | 'n' }): Promise<UnitRootResult>
     kpssTest(column: string, options?: { lags?: number; regression?: 'c' | 'ct' }): Promise<UnitRootResult>
     ridge(y: string, predictors: string[], options?: { alpha?: number }): Promise<PenalizedResult>
@@ -923,20 +957,29 @@ D.crossValidate = function (this: DataFrame, y, predictors, options) {
 D.autoModel = function (this: DataFrame, y, predictors, options = {}) {
   return autoModelFn(rowsOf(this, predictors), this.getColumn(y).toArray() as Array<number | string>, options)
 }
-D.propTest = function (this: DataFrame, eventsCol, options = {}) {
-  const { trials: trialsCol, by, ...rest } = options
-  if (by) {
+D.propTest = function (this: DataFrame, eventsCol, options: DataFramePropTestOptions) {
+  // Runtime method guard (JS callers may pass the wrong method despite the typed union).
+  const methodName = (options as { method?: string }).method
+  if (isPropTest2Options(options)) {
+    if (methodName === 'exact') {
+      throw new RangeError('propTest: method "exact" is only valid for one-sample tests; use "normal" or "fisher" with by')
+    }
+    const { trials: trialsCol, by, alternative, confidence, method, pooled } = options
     const agg = propAggByGroup(this, eventsCol, by, trialsCol)
     const levels = Object.keys(agg)
     if (levels.length !== 2) throw new RangeError(`propTest: column "${by}" must have exactly 2 levels, got ${levels.length}`)
     const a = agg[levels[0]!]!
     const b = agg[levels[1]!]!
-    return propTest2(a.events, a.trials, b.events, b.trials, rest)
+    return propTest2(a.events, a.trials, b.events, b.trials, { alternative, confidence, method, pooled })
   }
+  if (methodName === 'fisher') {
+    throw new RangeError('propTest: method "fisher" is only valid for two-sample tests; pass by with two levels')
+  }
+  const { trials: trialsCol, p0, alternative, confidence, method } = options
   if (!trialsCol) throw new RangeError('propTest: trials column is required for a one-sample test (omit by)')
   const events = sumNumericCol(this, eventsCol)
   const trials = sumNumericCol(this, trialsCol)
-  return propTest1(events, trials, rest)
+  return propTest1(events, trials, { p0, alternative, confidence, method })
 }
 D.adfTest = function (this: DataFrame, column, options = {}) {
   return adfTestFn(this.getColumn(column).toArray() as Num, options)
@@ -951,7 +994,11 @@ D.lasso = function (this: DataFrame, y, predictors, options = {}) {
   return lassoFn(this.getColumn(y).toArray() as Num, rowsOf(this, predictors), options)
 }
 D.ancova = function (this: DataFrame, y, group, covariate) {
-  return ancovaFn(this.getColumn(y).toArray() as Num, this.getColumn(group).toArray(), this.getColumn(covariate).toArray() as Num)
+  return ancovaFn(
+    this.getColumn(y).toArray() as Num,
+    asAncovaGroups(this.getColumn(group).toArray()),
+    this.getColumn(covariate).toArray() as Num,
+  )
 }
 D.ksTwoSample = function (this: DataFrame, column, by) {
   const g = groupsOf(this, column, by)

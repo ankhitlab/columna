@@ -95,11 +95,13 @@ export function pushdownProjections(plan: PlanNode): PlanNode {
         const sortCols = new Set<string>()
         for (const k of input.by) exprColumnRefs(k.expr, sortCols)
         const need = [...new Set([...names, ...sortCols])]
-        return {
+        const sorted: PlanNode = {
           type: 'sort',
           input: pushdownProjections({ type: 'project', input: input.input, columns: need }),
           by: input.by,
         }
+        // Keep the original projection so sort-only columns are not exposed.
+        return { type: 'project', input: sorted, columns: plan.columns }
       }
 
       if (input.type === 'filter') {

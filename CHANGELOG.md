@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Positioning / Engines docs: native gather threshold 50k (not 250k); CSV compare-js ~280 ms with native; Parquet write and fused plan list updated; rule-based rewrite listed under offers (not full CBO under gaps); "multi-threaded engine" moved from a gap to an offer (threads accelerate individual heavy ops; not a morsel-driven parallel runtime).
+
+### Fixed
+
+- Optimizer semantics (review 1684ac4): do not push right-side filters under `LEFT`/`OUTER` joins (or left-side under `RIGHT`/`OUTER`); keep the outer `project` after pushing columns under `sort` so `select` cannot re-expose sort-only fields; treat `agg` and `rowOffset` as filter pushdown barriers so `mean` / `shift` see the correct input; skip inner-join build-side swap and graph reorder when non-key column names collide (avoids swapping `value` vs `value_right` provenance); merge composite equi-key components into one join-graph edge instead of dropping all but the first.
+- `hashPlan` / persist: distinct UDF identities via process-local function tokens; distinguish `null` / `NaN` / `±Infinity` literals so cache lookup cannot return another expression's result.
+- Spill temp files: per-process private subdirectory under the spill parent, `0700`/`0600` modes, exclusive create (`wx`), unlink on write failure.
+- `columna/advanced` DTS: discriminated `propTest` one-/two-sample options (`exact`|`normal` vs `normal`|`fisher`) with runtime method checks; `ancova` coerces boolean group labels to `"true"`/`"false"` instead of passing `Series.toArray()` booleans through.
+- Integration regressions: `packages/core/tests/review-1684ac4.test.ts`.
+
 ## [0.2.1] - 2026-09-17
 
 Republish of the 0.2.0 contents after the initial `0.2.0` tarball stalled in the npm registry staging queue.

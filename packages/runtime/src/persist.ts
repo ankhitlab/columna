@@ -45,10 +45,30 @@ function isTableView(v: unknown): v is TableView {
   )
 }
 
+/** Process-local identity for UDFs so distinct mapElements.fn values do not collide. */
+let fnIdSeq = 0
+const fnIds = new WeakMap<object, number>()
+
+function functionToken(fn: object): { __fn: number } {
+  let id = fnIds.get(fn)
+  if (id === undefined) {
+    id = ++fnIdSeq
+    fnIds.set(fn, id)
+  }
+  return { __fn: id }
+}
+
 /** Stable structural hash of a plan tree (good enough for persist keys). */
 export function hashPlan(plan: PlanNode): string {
   return JSON.stringify(plan, (_k, v) => {
     if (typeof v === 'bigint') return v.toString()
+    if (typeof v === 'function') return functionToken(v)
+    // JSON.stringify maps NaN / ±Infinity to null — keep them distinct from null literals.
+    if (typeof v === 'number') {
+      if (Number.isNaN(v)) return { __num: 'NaN' }
+      if (v === Infinity) return { __num: 'Infinity' }
+      if (v === -Infinity) return { __num: '-Infinity' }
+    }
     if (isTableView(v)) return tableToken(v)
     // Typed arrays / buffers appear only inside tables; skip if any leak through.
     if (ArrayBuffer.isView(v)) return { __view: (v as ArrayBufferView).byteLength }

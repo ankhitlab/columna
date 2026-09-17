@@ -366,7 +366,7 @@ export { manovaModel, type ManovaModelResult, type ManovaTerm } from './manova.j
 export { crossValidate, autoModel, type CvResult, type AutoModelResult, type ModelKind, type Metrics } from './automl.js'
 export { random, patterned, type Random } from './random.js'
 export { nelderMead, newtonMax, numGradient, numHessian, type NelderMeadResult, type NewtonResult } from './optim.js'
-export { ADVANCED_INSTALLED, type DataFrameTTestOptions, type DataFramePropTestOptions, type MannWhitneyOptions } from './dataframe.js'
+export { ADVANCED_INSTALLED, type DataFrameTTestOptions, type DataFramePropTestOptions, type DataFramePropTest1Options, type DataFramePropTest2Options, type MannWhitneyOptions } from './dataframe.js'
 export { formatReport, type ReportFormat } from './formatReport.js'
 export { anovaTwoWay, ancova, anovaTwoWayBalanced, type AnovaTwoWayResult, type AncovaResult } from './anova2.js'
 export { adfTest, kpssTest, type UnitRootResult } from './unitroot.js'

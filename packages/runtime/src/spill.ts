@@ -61,15 +61,42 @@ function nodePath(): Path {
 }
 
 let spillSeq = 0
+/** Per-process private spill subdirectory (under configured or default parent). */
+let spillSessionDir: string | null = null
+
+function chmodPrivate(fs: Fs, target: string, mode: number): void {
+  try {
+    fs.chmodSync(target, mode)
+  } catch {
+    /* Windows / unsupported chmod — best-effort */
+  }
+}
 
 function ensureSpillDir(): string {
   const fs = nodeFs()
   const path = nodePath()
   const os = require('node:os') as typeof import('node:os')
   const configured = resolveSpillDir()
-  const dir = configured || path.join(os.tmpdir(), 'columna-spill')
-  fs.mkdirSync(dir, { recursive: true })
-  return dir
+  const parent = configured || path.join(os.tmpdir(), 'columna-spill')
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 })
+  chmodPrivate(fs, parent, 0o700)
+
+  if (configured) {
+    // Caller-configured dir: use it directly (still forced private).
+    return parent
+  }
+  if (spillSessionDir) {
+    try {
+      if (fs.existsSync(spillSessionDir)) return spillSessionDir
+    } catch {
+      /* recreate below */
+    }
+  }
+  // Dedicated private subdirectory per process — not the shared parent itself.
+  const pid = typeof process !== 'undefined' ? process.pid : 0
+  spillSessionDir = fs.mkdtempSync(path.join(parent, `p${pid}-`))
+  chmodPrivate(fs, spillSessionDir, 0o700)
+  return spillSessionDir
 }
 
 export function spillTempPath(prefix = 'run'): string {
@@ -114,7 +141,18 @@ export function spillWrite(table: TableView, path?: string): string {
     buf.set(p, off)
     off += p.byteLength
   }
-  fs.writeFileSync(outPath, buf)
+  // Exclusive create + private mode (umask must not leave 0644).
+  try {
+    fs.writeFileSync(outPath, buf, { mode: 0o600, flag: 'wx' })
+    chmodPrivate(fs, outPath, 0o600)
+  } catch (err) {
+    try {
+      fs.unlinkSync(outPath)
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw err
+  }
   recordSpilledBytes(total)
   return outPath
 }

@@ -63,9 +63,13 @@ describe('projection pushdown', () => {
       },
     }
     const out = pushdownProjections(plan)
-    expect(out.type).toBe('sort')
-    if (out.type === 'sort') {
-      expect(out.input.type).toBe('project')
+    expect(out.type).toBe('project')
+    if (out.type === 'project') {
+      expect(out.columns).toEqual(['a'])
+      expect(out.input.type).toBe('sort')
+      if (out.input.type === 'sort') {
+        expect(out.input.input.type).toBe('project')
+      }
     }
   })
 
