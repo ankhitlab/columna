@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { DataFrame, clearPersistCache } from '@columna/core'
+import { DataFrame, clearPersistCache, col } from '@columna/core'
 import {
   Runtime,
   clearMemoryPolicy,
@@ -63,5 +63,30 @@ describe('persist LRU cache', () => {
     expect(key.includes('"__table"')).toBe(true)
     expect(key.length).toBeLessThan(2_000)
     expect(ms).toBeLessThan(50)
+  })
+})
+
+describe('persist regressions', () => {
+  it('distinguishes positive and negative zero', () => {
+    const df = DataFrame.fromColumns({ x: [1] })
+
+    const positive = df.withColumn('y', col('x').div(0)).plan
+    const negative = df.withColumn('y', col('x').div(-0)).plan
+
+    expect(hashPlan(positive)).not.toBe(hashPlan(negative))
+  })
+
+  it('persists the canonical optimized plan', async () => {
+    const query = DataFrame.fromColumns({ x: [1, 2, 3] })
+      .filter(col('x').gt(0))
+      .filter(col('x').lt(3))
+      .persist()
+
+    const first = await query.collectWithReport()
+    expect(first.report.cacheHit).toBe(false)
+
+    const second = await query.collectWithReport()
+    expect(second.report.cacheHit).toBe(true)
+    expect(second.frame.toArray()).toEqual([{ x: 1 }, { x: 2 }])
   })
 })

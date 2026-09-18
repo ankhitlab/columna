@@ -63,6 +63,7 @@ function nodePath(): Path {
 let spillSeq = 0
 /** Per-process private spill subdirectory (under configured or default parent). */
 let spillSessionDir: string | null = null
+let spillSessionParent: string | null = null
 
 function chmodPrivate(fs: Fs, target: string, mode: number): void {
   try {
@@ -76,27 +77,26 @@ function ensureSpillDir(): string {
   const fs = nodeFs()
   const path = nodePath()
   const os = require('node:os') as typeof import('node:os')
+
   const configured = resolveSpillDir()
   const parent = configured || path.join(os.tmpdir(), 'columna-spill')
-  fs.mkdirSync(parent, { recursive: true, mode: 0o700 })
-  chmodPrivate(fs, parent, 0o700)
 
-  if (configured) {
-    // Caller-configured dir: use it directly (still forced private).
-    return parent
+  fs.mkdirSync(parent, { recursive: true })
+
+  if (spillSessionDir && spillSessionParent === parent && fs.existsSync(spillSessionDir)) {
+    return spillSessionDir
   }
-  if (spillSessionDir) {
-    try {
-      if (fs.existsSync(spillSessionDir)) return spillSessionDir
-    } catch {
-      /* recreate below */
-    }
-  }
-  // Dedicated private subdirectory per process — not the shared parent itself.
+
   const pid = typeof process !== 'undefined' ? process.pid : 0
-  spillSessionDir = fs.mkdtempSync(path.join(parent, `p${pid}-`))
-  chmodPrivate(fs, spillSessionDir, 0o700)
-  return spillSessionDir
+
+  const sessionDir = fs.mkdtempSync(path.join(parent, `columna-p${pid}-`))
+
+  chmodPrivate(fs, sessionDir, 0o700)
+
+  spillSessionDir = sessionDir
+  spillSessionParent = parent
+
+  return sessionDir
 }
 
 export function spillTempPath(prefix = 'run'): string {
@@ -141,16 +141,32 @@ export function spillWrite(table: TableView, path?: string): string {
     buf.set(p, off)
     off += p.byteLength
   }
-  // Exclusive create + private mode (umask must not leave 0644).
+  // Exclusive create + private mode. Only unlink a file this invocation created.
+  let fd: number | undefined
+
   try {
-    fs.writeFileSync(outPath, buf, { mode: 0o600, flag: 'wx' })
-    chmodPrivate(fs, outPath, 0o600)
-  } catch (err) {
+    fd = fs.openSync(outPath, 'wx', 0o600)
+
     try {
-      fs.unlinkSync(outPath)
-    } catch {
-      /* ignore cleanup failure */
+      fs.writeFileSync(fd, buf)
+      try {
+        fs.fchmodSync(fd, 0o600)
+      } catch {
+        /* Windows / unsupported fchmod — best-effort */
+      }
+    } finally {
+      fs.closeSync(fd)
     }
+  } catch (err) {
+    // Only clean up a path that THIS invocation successfully created.
+    if (fd !== undefined) {
+      try {
+        fs.unlinkSync(outPath)
+      } catch {
+        // Ignore cleanup failure. Preserve original exception.
+      }
+    }
+
     throw err
   }
   recordSpilledBytes(total)

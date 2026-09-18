@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -55,6 +55,25 @@ describe('spill read/write', () => {
       expect(back.columns[1]!.data).toEqual(['hello', 'world', 'nullish'])
     } finally {
       spillUnlink(path)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('EEXIST does not delete or overwrite an existing foreign file', () => {
+    const table = tableFromColumns([
+      {
+        field: { name: 'x', dtype: 'f64', nullable: false },
+        data: new Float64Array([1, 2, 3]),
+      },
+    ])
+    const dir = mkdtempSync(join(tmpdir(), 'columna-spill-eexist-'))
+    const path = join(dir, 'owned-by-other.cspill')
+    const sentinel = Buffer.from('do-not-touch')
+    writeFileSync(path, sentinel)
+    try {
+      expect(() => spillWrite(table, path)).toThrow()
+      expect(readFileSync(path)).toEqual(sentinel)
+    } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })

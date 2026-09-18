@@ -2,6 +2,7 @@ import type { TableView } from '@columna/arrow'
 import { estimateTableBytes } from '@columna/arrow'
 import type { PlanNode } from './types.js'
 import { getMemoryPolicy } from './memory.js'
+import { optimizePlan } from './optimize.js'
 
 export type PersistLookup = { table: TableView } | null
 
@@ -65,6 +66,7 @@ export function hashPlan(plan: PlanNode): string {
     if (typeof v === 'function') return functionToken(v)
     // JSON.stringify maps NaN / ±Infinity to null — keep them distinct from null literals.
     if (typeof v === 'number') {
+      if (Object.is(v, -0)) return { __num: '-0' }
       if (Number.isNaN(v)) return { __num: 'NaN' }
       if (v === Infinity) return { __num: 'Infinity' }
       if (v === -Infinity) return { __num: '-Infinity' }
@@ -76,52 +78,74 @@ export function hashPlan(plan: PlanNode): string {
   })
 }
 
+/** Canonical cache key: mark/lookup/store always hash the optimized plan. */
+function cacheKey(plan: PlanNode): string {
+  return hashPlan(optimizePlan(plan))
+}
+
 export function markPlanPersist(plan: PlanNode): void {
-  pendingPersist.add(hashPlan(plan))
+  pendingPersist.add(cacheKey(plan))
 }
 
 export function unmarkPlanPersist(plan: PlanNode): void {
-  const key = hashPlan(plan)
+  const key = cacheKey(plan)
   pendingPersist.delete(key)
   dropPersistCacheKey(key)
 }
 
 export function lookupPersistCache(plan: PlanNode): PersistLookup {
   if (cache.size === 0) return null
-  const key = hashPlan(plan)
+
+  const key = cacheKey(plan)
   const hit = cache.get(key)
   if (!hit) return null
+
   const idx = lru.indexOf(key)
   if (idx >= 0) lru.splice(idx, 1)
   lru.push(key)
+
   return { table: hit.table }
 }
 
 export function maybeStorePersist(plan: PlanNode, table: TableView): void {
   if (pendingPersist.size === 0 && cache.size === 0) return
-  const key = hashPlan(plan)
+
+  const key = cacheKey(plan)
   if (!pendingPersist.has(key) && !cache.has(key)) return
+
   storePersistCache(plan, table, true)
 }
 
 export function storePersistCache(plan: PlanNode, table: TableView, pinned = true): void {
-  const key = hashPlan(plan)
+  const key = cacheKey(plan)
+
   pendingPersist.add(key)
+
   const bytes = estimateTableBytes(table)
   const existing = cache.get(key)
+
   if (existing) {
     cacheBytes -= existing.bytes
+
     const idx = lru.indexOf(key)
     if (idx >= 0) lru.splice(idx, 1)
   }
-  cache.set(key, { key, table, bytes, pinned })
+
+  cache.set(key, {
+    key,
+    table,
+    bytes,
+    pinned,
+  })
+
   lru.push(key)
   cacheBytes += bytes
+
   evictIfNeeded()
 }
 
 export function dropPersistCache(plan: PlanNode): boolean {
-  return dropPersistCacheKey(hashPlan(plan))
+  return dropPersistCacheKey(cacheKey(plan))
 }
 
 function dropPersistCacheKey(key: string): boolean {
