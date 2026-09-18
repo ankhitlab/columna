@@ -87,6 +87,24 @@ export function pushdownProjections(plan: PlanNode): PlanNode {
         const rightCols = leafColumnNames(input.right)
         const lSuffix = input.lSuffix ?? ''
         const rSuffix = input.rSuffix ?? '_right'
+
+        // Hotfix: never prune join children when the projection asks for a
+        // collision/suffix output name. Stripping `_right` and dropping the
+        // left collidee changes the join schema (score_right → score).
+        // Full provenance (OutputField) is the long-term fix.
+        const asksCollisionSuffix = names.some((name) => {
+          if (rSuffix && name.endsWith(rSuffix)) {
+            const base = name.slice(0, -rSuffix.length)
+            if (base && leftCols.has(base) && rightCols.has(base)) return true
+          }
+          if (lSuffix && name.endsWith(lSuffix)) {
+            const base = name.slice(0, -lSuffix.length)
+            if (base && leftCols.has(base) && rightCols.has(base)) return true
+          }
+          return false
+        })
+        if (asksCollisionSuffix) return { ...plan, input }
+
         const leftNeed = new Set(input.leftOn)
         const rightNeed = new Set(input.rightOn)
         let classified = true
@@ -95,20 +113,6 @@ export function pushdownProjections(plan: PlanNode): PlanNode {
           if (leftCols.has(name)) {
             leftNeed.add(name)
             placed = true
-          }
-          if (lSuffix && name.endsWith(lSuffix)) {
-            const base = name.slice(0, -lSuffix.length)
-            if (base && leftCols.has(base) && rightCols.has(base)) {
-              leftNeed.add(base)
-              placed = true
-            }
-          }
-          if (rSuffix && name.endsWith(rSuffix)) {
-            const base = name.slice(0, -rSuffix.length)
-            if (base && rightCols.has(base)) {
-              rightNeed.add(base)
-              placed = true
-            }
           }
           if (!leftCols.has(name) && rightCols.has(name)) {
             rightNeed.add(name)

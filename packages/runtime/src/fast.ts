@@ -3783,8 +3783,12 @@ export function tryFastExprColumn(table: TableView, expr: ExprNode, name: string
   }
 }
 
-/** Column names referenced by a projection list (strings + col exprs). */
-export function projectColumnNames(columns: Array<string | ExprNode>): string[] | null {
+/**
+ * Input column names a projection must read (strings + col / alias(col)).
+ * Alias output names are intentionally not returned — use `isIdentityProjection`
+ * before skipping a final project rename.
+ */
+export function requiredInputColumns(columns: Array<string | ExprNode>): string[] | null {
   const names: string[] = []
   for (const c of columns) {
     if (typeof c === 'string') names.push(c)
@@ -3793,4 +3797,20 @@ export function projectColumnNames(columns: Array<string | ExprNode>): string[] 
     else return null // complex expr — cannot prune safely to just inputs without eval
   }
   return names
+}
+
+/** @deprecated Use requiredInputColumns — kept for callers that prune by source names. */
+export function projectColumnNames(columns: Array<string | ExprNode>): string[] | null {
+  return requiredInputColumns(columns)
+}
+
+/** True when every projection entry is an identity column ref (no rename / compute). */
+export function isIdentityProjection(columns: Array<string | ExprNode>): boolean {
+  for (const c of columns) {
+    if (typeof c === 'string') continue
+    if (c.type === 'col') continue
+    if (c.type === 'alias' && c.expr.type === 'col' && c.name === c.expr.name) continue
+    return false
+  }
+  return true
 }

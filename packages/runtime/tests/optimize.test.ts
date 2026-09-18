@@ -640,6 +640,28 @@ describe('optimizer correctness regressions', () => {
     expect(out.toArray()).toEqual([])
   })
 
+  it('does not prune join children when projecting a collision suffix', async () => {
+    const left = DataFrame.fromRows([{ id: 1, score: 10 }])
+    const right = DataFrame.fromRows([{ id: 1, score: 20 }])
+
+    const out = await left.join(right, { on: 'id' }).select('score_right').collect()
+
+    expect(out.toArray()).toEqual([{ score_right: 20 }])
+  })
+
+  it('preserves alias after join select', async () => {
+    const left = DataFrame.fromRows([{ id: 1, score: 10 }])
+    const right = DataFrame.fromRows([{ id: 1, score: 20 }])
+
+    const out = await left
+      .join(right, { on: 'id' })
+      .select(col('score').alias('x'))
+      .collect()
+
+    expect(out.columns).toEqual(['x'])
+    expect(out.toArray()).toEqual([{ x: 10 }])
+  })
+
   it('does not drop a second edge to an already joined subtree', async () => {
     const a = DataFrame.fromRows([{ aid: 1, a: 10 }])
     const b = DataFrame.fromRows([{ bid: 1, b: 20 }])

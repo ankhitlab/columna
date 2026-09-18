@@ -27,6 +27,8 @@ import {
   applyMathOp,
   matchDualGtFilter,
   projectColumnNames,
+  requiredInputColumns,
+  isIdentityProjection,
   tryFastDescribe,
   argsortNumeric,
   countUniqueNumeric,
@@ -2279,7 +2281,7 @@ function executeCpuNode(plan: PlanNode): TableView {
       }
       // Project after join: only materialize requested output columns.
       if (plan.input.type === 'join' && plan.input.how !== 'cross') {
-        const names = projectColumnNames(plan.columns)
+        const names = requiredInputColumns(plan.columns)
         if (names) {
           const joined = joinTables(
             executeCpuNode(plan.input.left),
@@ -2292,7 +2294,9 @@ function executeCpuNode(plan: PlanNode): TableView {
             plan.input.validate,
             names,
           )
+          // Skip final project only for identity column picks (no alias rename).
           if (
+            isIdentityProjection(plan.columns) &&
             joined.schema.length === names.length &&
             names.every((n, i) => joined.schema[i]!.name === n)
           ) {
