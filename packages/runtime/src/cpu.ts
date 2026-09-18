@@ -2310,6 +2310,14 @@ export function executeCpu(plan: PlanNode): TableView {
   return ensureMaterialized(executeCpuNode(plan))
 }
 
+/**
+ * Execute a plan without logical rewrites.
+ * Used by optimizer differential tests: results must match `executeCpuUnoptimized(optimizePlan(plan))`.
+ */
+export function executeCpuUnoptimized(plan: PlanNode): TableView {
+  return ensureMaterialized(executeCpuNode(plan))
+}
+
 function executeCpuNode(plan: PlanNode): TableView {
   switch (plan.type) {
     case 'scan':

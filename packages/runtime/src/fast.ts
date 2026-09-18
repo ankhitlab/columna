@@ -1734,6 +1734,12 @@ export function tryFastJoin(
   const span = rMax - rMin + 1
   const useDense = Number.isFinite(rMin) && span > 0 && span <= Math.max(rCount * 4, 1_048_576) && span <= 50_000_000
 
+  // This fast path stores one build-row per key. Duplicate right keys need the
+  // generic join (Map → number[]); returning null preserves many-match semantics
+  // when the optimizer swaps a non-unique side onto the build (right).
+  // semi/anti only need existence, so duplicates on the build side are fine.
+  const buildMustBeUnique = how === 'inner' || how === 'left'
+
   let dense: Int32Array | null = null
   let hash: Map<number, number> | null = null
   if (useDense) {
@@ -1745,20 +1751,33 @@ export function tryFastJoin(
       !rCol.nullBitmap &&
       isNativeKernelsLoaded()
     ) {
+      if (buildMustBeUnique) {
+        const seen = new Uint8Array(span)
+        for (let i = 0; i < rn; i++) {
+          const off = rData[i]! - (rMin | 0)
+          if (off < 0 || off >= span) continue
+          if (seen[off]) return null
+          seen[off] = 1
+        }
+      }
       dense = nativeBuild(rData, rMin | 0)
     } else {
       dense = new Int32Array(span)
       dense.fill(-1)
       for (let i = 0; i < rn; i++) {
         if (rCol.nullBitmap && !isValid(rCol.nullBitmap, i)) continue
-        dense[rData[i]! - rMin] = i
+        const off = rData[i]! - rMin
+        if (buildMustBeUnique && dense[off] !== -1) return null
+        dense[off] = i
       }
     }
   } else {
     hash = new Map()
     for (let i = 0; i < rn; i++) {
       if (rCol.nullBitmap && !isValid(rCol.nullBitmap, i)) continue
-      hash.set(rData[i]!, i)
+      const k = rData[i]!
+      if (buildMustBeUnique && hash.has(k)) return null
+      hash.set(k, i)
     }
   }
 
@@ -3094,24 +3113,43 @@ function evalVec(table: TableView, expr: ExprNode, n: number): FastVal | null {
       const hi = evalVec(table, expr.high, n)
       if (!inner || !lo || !hi) return null
       if (inner.t === 'str_scalar' || inner.t === 'str_vec') return null
-      if (lo.t !== 'scalar' || hi.t !== 'scalar') return null
+      if (lo.t === 'str_scalar' || lo.t === 'str_vec') return null
+      if (hi.t === 'str_scalar' || hi.t === 'str_vec') return null
       if (inner.t !== 'vec' && inner.t !== 'scalar') return null
-      const a = lo.v
-      const b = hi.v
+      if (lo.t !== 'vec' && lo.t !== 'scalar') return null
+      if (hi.t !== 'vec' && hi.t !== 'scalar') return null
+
       const closed = expr.closed ?? 'both'
-      const inRange = (v: number): boolean => {
+      const loAt = (i: number): number | null => {
+        if (lo.t === 'scalar') return lo.v
+        if (lo.bitmap && !isValid(lo.bitmap, i)) return null
+        return lo.data[i]!
+      }
+      const hiAt = (i: number): number | null => {
+        if (hi.t === 'scalar') return hi.v
+        if (hi.bitmap && !isValid(hi.bitmap, i)) return null
+        return hi.data[i]!
+      }
+      const inRange = (v: number, a: number, b: number): boolean => {
         const ge = closed === 'both' || closed === 'left' ? v >= a : v > a
         const le = closed === 'both' || closed === 'right' ? v <= b : v < b
         return ge && le
       }
-      if (inner.t === 'scalar') return { t: 'scalar', v: inRange(inner.v) ? 1 : 0 }
+
+      if (inner.t === 'scalar' && lo.t === 'scalar' && hi.t === 'scalar') {
+        return { t: 'scalar', v: inRange(inner.v, lo.v, hi.v) ? 1 : 0 }
+      }
+
       const out = new Uint8Array(n)
-      const src = inner.data
-      const bm = inner.bitmap
-      if (bm) {
-        for (let i = 0; i < n; i++) out[i] = isValid(bm, i) && inRange(src[i]!) ? 1 : 0
-      } else {
-        for (let i = 0; i < n; i++) out[i] = inRange(src[i]!) ? 1 : 0
+      for (let i = 0; i < n; i++) {
+        if (inner.t === 'vec' && inner.bitmap && !isValid(inner.bitmap, i)) {
+          out[i] = 0
+          continue
+        }
+        const v = inner.t === 'scalar' ? inner.v : inner.data[i]!
+        const a = loAt(i)
+        const b = hiAt(i)
+        out[i] = a !== null && b !== null && inRange(v, a, b) ? 1 : 0
       }
       return { t: 'vec', data: out, bitmap: undefined, kind: 'bool', owned: true }
     }
