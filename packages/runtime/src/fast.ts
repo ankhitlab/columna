@@ -17,6 +17,7 @@ import {
   type TableView,
 } from '@columna/arrow'
 import type { AggKind, ExprNode, MathOp, QuantileMethod } from './types.js'
+import { encodeCompositeKey, type KeyPart } from './composite_key.js'
 import { applyMathOp, roundHalfAway } from './math.js'
 import { tryFused } from './fused.js'
 import {
@@ -1572,23 +1573,23 @@ export function tryChunkedGroupBy(
     const local = new Map<string, Acc[]>()
     for (let i = start; i < end; i++) {
       let nullKey = false
-      const parts: string[] = []
+      const parts: KeyPart[] = []
       for (const kc of keyCols) {
         if (kc.nullBitmap && !isValid(kc.nullBitmap, i)) {
           nullKey = true
-          parts.push('∅')
+          parts.push(null)
         } else if (kc.field.dtype === 'category' && kc.dictionary) {
-          parts.push(kc.dictionary[Number((kc.data as Uint32Array)[i])] ?? '∅')
+          parts.push(kc.dictionary[Number((kc.data as Uint32Array)[i])] ?? null)
         } else if (kc.field.dtype === 'utf8') {
           parts.push(String((kc.data as string[])[i]))
         } else {
           const kd = numericView(kc)
           if (!kd) return null
-          parts.push(String(kd[i]))
+          parts.push(kd[i]!)
         }
       }
       void nullKey
-      const key = parts.join('\0')
+      const key = encodeCompositeKey(parts)
       let accs = local.get(key)
       if (!accs) {
         accs = parsed.map((p) => freshAcc(needVals && needsValueList(p.op)))
@@ -2122,13 +2123,15 @@ export function tryFusedFilterUnique(
   const order: string[] = []
   for (let i = 0; i < n; i++) {
     if (!passes(i)) continue
-    const key = cols
-      .map((name) => {
+    const key = encodeCompositeKey(
+      cols.map((name) => {
         const c = getColumn(table, name)
-        if (!isValid(c.nullBitmap, i)) return '∅'
-        return String(getValue(c.data, i))
-      })
-      .join('\0')
+        if (!isValid(c.nullBitmap, i)) return null
+        const v = getValue(c.data, i)
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+        return String(v)
+      }),
+    )
     if (!seen.has(key)) {
       seen.set(key, i)
       order.push(key)

@@ -21,6 +21,7 @@ import type { AggKind, Backend, CorrMethod, ExecContext, ExprNode, JoinKind, Pla
 import { parallelDualGtIndices, parallelTakeTable, parallelFilter, parallelSort, parallelGroupBy, parallelUnique, PARALLEL_FILTER_MIN_ROWS, PARALLEL_SORT_MIN_ROWS, PARALLEL_GROUPBY_MIN_ROWS, PARALLEL_UNIQUE_MIN_ROWS } from './parallel.js'
 import { optimizePlan, joinOrderChanged, estimatePlanRows } from './optimize.js'
 import { exprSome, forEachChildExpr, mapExprChildren } from './expr_walk.js'
+import { encodeCompositeKey, type KeyPart } from './composite_key.js'
 import { tryLoadNativeKernels, NATIVE_JOIN_MIN_ROWS } from './native_kernels.js'
 import { orderRows, overAggregateNumeric, overCumulativeNumeric, partitionIds, type Partition } from './over.js'
 import {
@@ -919,14 +920,15 @@ function groupByTableSlow(
 ): TableView {
   const groups = new Map<string, number[]>()
   for (let i = 0; i < table.numRows; i++) {
-    const parts = keys.map((k) => {
+    const parts: KeyPart[] = keys.map((k) => {
       const col = getColumn(table, k)
-      if (!isValid(col.nullBitmap, i)) return '∅'
+      if (!isValid(col.nullBitmap, i)) return null
       const v = getValue(col.data, i)
-      if (col.field.dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? '∅'
+      if (col.field.dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? null
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
       return String(v)
     })
-    const key = parts.join('\0')
+    const key = encodeCompositeKey(parts)
     let arr = groups.get(key)
     if (!arr) {
       arr = []
@@ -995,16 +997,17 @@ function groupByTableSlow(
 }
 
 function joinKey(table: TableView, cols: string[], row: number): string {
-  return cols
-    .map((name) => {
+  return encodeCompositeKey(
+    cols.map((name) => {
       const col = getColumn(table, name)
-      if (!isValid(col.nullBitmap, row)) return '∅'
+      if (!isValid(col.nullBitmap, row)) return null
       const v = getValue(col.data, row)
       // category keys must compare by their string, never by the per-frame dictionary code
-      if (col.field.dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? '∅'
+      if (col.field.dtype === 'category' && col.dictionary) return col.dictionary[Number(v)] ?? null
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
       return String(v)
-    })
-    .join('\0')
+    }),
+  )
 }
 
 function expandCrossColumn(col: Column, mode: 'repeat' | 'tile', ln: number, rn: number): Column {
@@ -1941,13 +1944,15 @@ function uniqueTableInMemory(table: TableView, columns: string[] | undefined, ke
   const seen = new Map<string, number>()
   const order: string[] = []
   for (let i = 0; i < table.numRows; i++) {
-    const key = cols
-      .map((n) => {
+    const key = encodeCompositeKey(
+      cols.map((n) => {
         const c = getColumn(table, n)
-        if (!isValid(c.nullBitmap, i)) return '∅'
-        return String(getValue(c.data, i))
-      })
-      .join('\0')
+        if (!isValid(c.nullBitmap, i)) return null
+        const v = getValue(c.data, i)
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+        return String(v)
+      }),
+    )
     if (!seen.has(key)) {
       seen.set(key, i)
       order.push(key)
@@ -2110,12 +2115,15 @@ function windowTable(
 
   const partitions = new Map<string, number[]>()
   for (let i = 0; i < working.numRows; i++) {
-    const key = (partitionBy ?? [])
-      .map((n) => {
+    const key = encodeCompositeKey(
+      (partitionBy ?? []).map((n) => {
         const c = getColumn(working, n)
-        return isValid(c.nullBitmap, i) ? String(getValue(c.data, i)) : '∅'
-      })
-      .join('\0')
+        if (!isValid(c.nullBitmap, i)) return null
+        const v = getValue(c.data, i)
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+        return String(v)
+      }),
+    )
     let arr = partitions.get(key)
     if (!arr) {
       arr = []
@@ -2218,7 +2226,9 @@ function pivotTable(
   const pivoted = [...colValues]
   const groups = new Map<string, number[]>()
   for (let i = 0; i < table.numRows; i++) {
-    const key = indexCols.map((c) => (isValid(c.nullBitmap, i) ? labelAt(c, i) : '∅')).join('\0')
+    const key = encodeCompositeKey(
+      indexCols.map((c) => (isValid(c.nullBitmap, i) ? labelAt(c, i) : null)),
+    )
     let arr = groups.get(key)
     if (!arr) {
       arr = []

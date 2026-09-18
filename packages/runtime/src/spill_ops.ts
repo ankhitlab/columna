@@ -13,6 +13,7 @@ import {
   type TableView,
 } from '@columna/arrow'
 import type { ExprNode } from './types.js'
+import { encodeCompositeKey } from './composite_key.js'
 import { memoryBudget, recordLiveBytes, spillEnabled } from './memory.js'
 import { concatTables, spillRead, spillTempPath, spillUnlink, spillUnlinkMany, spillWrite } from './spill.js'
 
@@ -201,11 +202,13 @@ export function joinTablesSpilled(
 
 /** Row key helper shared with unique/join spill paths. */
 export function rowKey(table: TableView, columns: string[], row: number): string {
-  return columns
-    .map((n) => {
+  return encodeCompositeKey(
+    columns.map((n) => {
       const c = getColumn(table, n)
-      if (!isValid(c.nullBitmap, row)) return '∅'
-      return String(getValue(c.data, row))
-    })
-    .join('\0')
+      if (!isValid(c.nullBitmap, row)) return null
+      const v = getValue(c.data, row)
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v
+      return String(v)
+    }),
+  )
 }
