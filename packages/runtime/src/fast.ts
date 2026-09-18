@@ -579,8 +579,8 @@ export function tryFastSort(
   const n = table.numRows
 
   // Top-k heap path.
-  // Only when the key has no nulls: otherwise the full sort path is responsible
-  // for placing nulls according to nullsLast/nullsFirst.
+  // Only when the key has no nulls and no NaN: otherwise the full sort path is
+  // responsible for null placement and NaN total-order (radix).
   if (
     limit !== undefined &&
     limit > 0 &&
@@ -590,13 +590,21 @@ export function tryFastSort(
     !keys[0]!.nullBitmap
   ) {
     const key = keys[0]!
+    let hasNan = false
+    for (let i = 0; i < n; i++) {
+      if (Number.isNaN(key.codes[i]!)) {
+        hasNan = true
+        break
+      }
+    }
+    if (!hasNan) {
+      const idx = new Uint32Array(n)
+      for (let i = 0; i < n; i++) idx[i] = i
 
-    const idx = new Uint32Array(n)
-    for (let i = 0; i < n; i++) idx[i] = i
+      topKIndices(idx, key.codes, undefined, key.descending, limit)
 
-    topKIndices(idx, key.codes, undefined, key.descending, limit)
-
-    return gather(table, idx.subarray(0, limit))
+      return gather(table, idx.subarray(0, limit))
+    }
   }
 
   // Native Rayon argsort for large single-key numeric sorts (no limit / limit ≥ n).
@@ -663,13 +671,17 @@ function topKIndices(
   const heapIdx = new Uint32Array(k)
   const heapVal = new Float64Array(k)
   let size = 0
-  const worse = (a: number, b: number) => (descending ? a < b : a > b)
+  // Total order: value, then original row index (stable vs full argsort).
+  const worse = (aVal: number, aIdx: number, bVal: number, bIdx: number) => {
+    if (aVal !== bVal) return descending ? aVal < bVal : aVal > bVal
+    return aIdx > bIdx
+  }
 
   // Root = worst of the current top-k (min-heap by "worse").
   const siftUp = (pos: number) => {
     while (pos > 0) {
       const parent = (pos - 1) >> 1
-      if (!worse(heapVal[pos]!, heapVal[parent]!)) break
+      if (!worse(heapVal[pos]!, heapIdx[pos]!, heapVal[parent]!, heapIdx[parent]!)) break
       const ti = heapIdx[parent]!
       const tv = heapVal[parent]!
       heapIdx[parent] = heapIdx[pos]!
@@ -684,8 +696,8 @@ function topKIndices(
       let worst = pos
       const l = pos * 2 + 1
       const r = l + 1
-      if (l < size && worse(heapVal[l]!, heapVal[worst]!)) worst = l
-      if (r < size && worse(heapVal[r]!, heapVal[worst]!)) worst = r
+      if (l < size && worse(heapVal[l]!, heapIdx[l]!, heapVal[worst]!, heapIdx[worst]!)) worst = l
+      if (r < size && worse(heapVal[r]!, heapIdx[r]!, heapVal[worst]!, heapIdx[worst]!)) worst = r
       if (worst === pos) break
       const ti = heapIdx[worst]!
       const tv = heapVal[worst]!
@@ -704,7 +716,7 @@ function topKIndices(
       heapIdx[size] = i
       heapVal[size] = v
       siftUp(size++)
-    } else if (worse(heapVal[0]!, v)) {
+    } else if (worse(heapVal[0]!, heapIdx[0]!, v, i)) {
       heapIdx[0] = i
       heapVal[0] = v
       siftDown(0)
@@ -715,8 +727,12 @@ function topKIndices(
   const order = new Uint32Array(size)
   for (let i = 0; i < size; i++) order[i] = i
   order.sort((ia, ib) => {
-    const d = heapVal[ia]! - heapVal[ib]!
-    return descending ? (d > 0 ? -1 : d < 0 ? 1 : 0) : d > 0 ? 1 : d < 0 ? -1 : 0
+    const va = heapVal[ia]!
+    const vb = heapVal[ib]!
+    if (va !== vb) {
+      return descending ? (va < vb ? 1 : -1) : va < vb ? -1 : 1
+    }
+    return heapIdx[ia]! - heapIdx[ib]!
   })
   for (let i = 0; i < size; i++) idx[i] = heapIdx[order[i]!]!
 }
@@ -829,11 +845,11 @@ function needsValueList(op: AggKind): boolean {
 function applyAggsAt(accs: Acc[], parsed: ParsedAgg[], i: number): void {
   for (let a = 0; a < parsed.length; a++) {
     const agg = parsed[a]!
+    if (agg.col.nullBitmap && !isValid(agg.col.nullBitmap, i)) continue
     if (agg.op === 'count') {
       accs[a]!.count++
       continue
     }
-    if (agg.col.nullBitmap && !isValid(agg.col.nullBitmap, i)) continue
     updateAcc(accs[a]!, agg.op, agg.data![i]!)
   }
 }
@@ -1061,12 +1077,12 @@ function denseUpdate(acc: DenseAggs, pack: number, i: number): void {
   const base = pack * naggs
   for (let a = 0; a < naggs; a++) {
     const op = ops[a]!
+    const bm = bitmaps[a]
+    if (bm && !isValid(bm, i)) continue
     if (op === OP_COUNT) {
       counts[base + a]!++
       continue
     }
-    const bm = bitmaps[a]
-    if (bm && !isValid(bm, i)) continue
     const v = datas[a]![i]!
     const idx = base + a
     const prev = counts[idx]!
@@ -1276,7 +1292,8 @@ function tryNativeDenseGroupBy(
   )
   if (!opsOk) return null
   if (keyCols.some((c) => c.nullBitmap)) return null
-  if (parsed.some((p) => p.op !== 'count' && p.col.nullBitmap)) return null
+  // Native fill uses row counts; align with generic non-null count by refusing null value cols.
+  if (parsed.some((p) => p.col.nullBitmap)) return null
 
   const wantSums = parsed.some((p) => p.op === 'sum' || p.op === 'mean' || p.op === 'count')
   const wantMinMax = parsed.some((p) => p.op === 'min' || p.op === 'max')
@@ -1732,7 +1749,23 @@ export function tryFastJoin(
   }
 
   const span = rMax - rMin + 1
-  const useDense = Number.isFinite(rMin) && span > 0 && span <= Math.max(rCount * 4, 1_048_576) && span <= 50_000_000
+  // Dense indexing requires integer keys; fractional offsets corrupt Int32Array slots.
+  let buildAllInt = Number.isInteger(rMin) && Number.isInteger(rMax)
+  if (buildAllInt) {
+    for (let i = 0; i < rn; i++) {
+      if (rCol.nullBitmap && !isValid(rCol.nullBitmap, i)) continue
+      if (!Number.isInteger(rData[i]!)) {
+        buildAllInt = false
+        break
+      }
+    }
+  }
+  const useDense =
+    buildAllInt &&
+    Number.isFinite(rMin) &&
+    span > 0 &&
+    span <= Math.max(rCount * 4, 1_048_576) &&
+    span <= 50_000_000
 
   // This fast path stores one build-row per key. Duplicate right keys need the
   // generic join (Map → number[]); returning null preserves many-match semantics
@@ -2136,15 +2169,26 @@ export function tryFusedFilterSortLimit(
         mask = evalVec(table, predicate, n)
       }
       if (resolved || mask) {
+        let hasNan = false
+        for (let i = 0; i < n; i++) {
+          if (Number.isNaN(data[i]!)) {
+            hasNan = true
+            break
+          }
+        }
+        if (!hasNan) {
         const descending = by[0]!.descending
         const heapIdx = new Uint32Array(limit)
         const heapVal = new Float64Array(limit)
         let size = 0
-        const worse = (a: number, b: number) => (descending ? a < b : a > b)
+        const worse = (aVal: number, aIdx: number, bVal: number, bIdx: number) => {
+          if (aVal !== bVal) return descending ? aVal < bVal : aVal > bVal
+          return aIdx > bIdx
+        }
         const siftUp = (pos: number) => {
           while (pos > 0) {
             const parent = (pos - 1) >> 1
-            if (!worse(heapVal[pos]!, heapVal[parent]!)) break
+            if (!worse(heapVal[pos]!, heapIdx[pos]!, heapVal[parent]!, heapIdx[parent]!)) break
             const ti = heapIdx[parent]!
             const tv = heapVal[parent]!
             heapIdx[parent] = heapIdx[pos]!
@@ -2159,8 +2203,8 @@ export function tryFusedFilterSortLimit(
             let worst = pos
             const l = pos * 2 + 1
             const r = l + 1
-            if (l < size && worse(heapVal[l]!, heapVal[worst]!)) worst = l
-            if (r < size && worse(heapVal[r]!, heapVal[worst]!)) worst = r
+            if (l < size && worse(heapVal[l]!, heapIdx[l]!, heapVal[worst]!, heapIdx[worst]!)) worst = l
+            if (r < size && worse(heapVal[r]!, heapIdx[r]!, heapVal[worst]!, heapIdx[worst]!)) worst = r
             if (worst === pos) break
             const ti = heapIdx[worst]!
             const tv = heapVal[worst]!
@@ -2180,7 +2224,7 @@ export function tryFusedFilterSortLimit(
             heapIdx[size] = i
             heapVal[size] = v
             siftUp(size++)
-          } else if (worse(heapVal[0]!, v)) {
+          } else if (worse(heapVal[0]!, heapIdx[0]!, v, i)) {
             heapIdx[0] = i
             heapVal[0] = v
             siftDown(0)
@@ -2189,12 +2233,17 @@ export function tryFusedFilterSortLimit(
         const order = new Uint32Array(size)
         for (let i = 0; i < size; i++) order[i] = i
         order.sort((ia, ib) => {
-          const d = heapVal[ia]! - heapVal[ib]!
-          return descending ? (d > 0 ? -1 : d < 0 ? 1 : 0) : d > 0 ? 1 : d < 0 ? -1 : 0
+          const va = heapVal[ia]!
+          const vb = heapVal[ib]!
+          if (va !== vb) {
+            return descending ? (va < vb ? 1 : -1) : va < vb ? -1 : 1
+          }
+          return heapIdx[ia]! - heapIdx[ib]!
         })
         const idx = new Uint32Array(size)
         for (let i = 0; i < size; i++) idx[i] = heapIdx[order[i]!]!
         return gather(table, idx)
+        }
       }
     }
   }
@@ -2391,11 +2440,11 @@ export function tryFastUnique(
       return gather(table, idx)
     }
 
-    // Hash on numbers (+ null key)
-    const NULL_KEY = Number.NaN
-    const seen = new Map<number, number>()
-    const order: number[] = []
-    const hasNullKey = (k: number) => Number.isNaN(k)
+    // Hash on numbers (+ null key distinct from NaN via SameValueZero-safe tags)
+    type HashKey = number | '__null__'
+    const NULL_KEY: HashKey = '__null__'
+    const seen = new Map<HashKey, number>()
+    const order: HashKey[] = []
     for (let i = 0; i < n; i++) {
       if (bitmap && !isValid(bitmap, i)) {
         if (!seen.has(NULL_KEY)) {
@@ -2408,7 +2457,7 @@ export function tryFastUnique(
         }
         continue
       }
-      const key = data[i]!
+      const key: HashKey = data[i]!
       if (!seen.has(key)) {
         seen.set(key, i)
         order.push(key)
@@ -2421,7 +2470,7 @@ export function tryFastUnique(
     const idx = new Uint32Array(order.length)
     let j = 0
     for (const k of order) {
-      const i = hasNullKey(k) ? seen.get(NULL_KEY)! : seen.get(k)!
+      const i = seen.get(k)!
       if (i >= 0) idx[j++] = i
     }
     return gather(table, idx.subarray(0, j))
@@ -2451,14 +2500,18 @@ export function tryFastUnique(
   const keyCols: Column[] = []
   const cards: number[] = []
   const strides: number[] = []
+  const nullCodes: number[] = []
   let card = 1
   for (const name of cols) {
     const c = getColumn(table, name)
     if (c.field.dtype !== 'category' || !c.dictionary) return null
-    const len = c.dictionary.length
+    const dictLen = c.dictionary.length
+    // Reserve one pack code for null so multi-key unique keeps null-key rows.
+    const len = dictLen + (c.nullBitmap ? 1 : 0)
     if (len <= 0 || card > Math.floor(65_536 / len)) return null
     strides.push(card)
     cards.push(len)
+    nullCodes.push(c.nullBitmap ? dictLen : -1)
     card *= len
     keyCols.push(c)
   }
@@ -2472,15 +2525,24 @@ export function tryFastUnique(
   let orderLen = 0
   const codeBufs = keyCols.map((c) => c.data as Uint32Array)
 
-  outer: for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n; i++) {
     let pack = 0
+    let ok = true
     for (let k = 0; k < keyCols.length; k++) {
       const col = keyCols[k]!
-      if (col.nullBitmap && !isValid(col.nullBitmap, i)) continue outer
-      const code = codeBufs[k]![i]!
-      if (code >= cards[k]!) continue outer
+      let code: number
+      if (col.nullBitmap && !isValid(col.nullBitmap, i)) {
+        code = nullCodes[k]!
+      } else {
+        code = codeBufs[k]![i]!
+      }
+      if (code < 0 || code >= cards[k]!) {
+        ok = false
+        break
+      }
       pack += code * strides[k]!
     }
+    if (!ok) continue
     if (first[pack]! < 0) {
       first[pack] = i
       orderPack[orderLen++] = pack

@@ -194,6 +194,77 @@ describe('top-k sort regressions', () => {
       { x: null, k: 1 },
     ])
   })
+
+  it('tie-breaks equal keys by original row order', async () => {
+    const df = DataFrame.fromRows([
+      { id: 0, k: 0 },
+      { id: 1, k: 1 },
+      { id: 2, k: 0 },
+    ])
+    const full = await df.sort('k').collect()
+    const top = await df.sort('k').head(2).collect()
+    expect(top.toArray()).toEqual(full.toArray().slice(0, 2))
+    expect(top.toArray().map((r) => r.id)).toEqual([0, 2])
+  })
+
+  it('NaN top-k matches full sort prefix', async () => {
+    const df = DataFrame.fromColumns({
+      id: [0, 1],
+      k: [Number.NaN, 1],
+    })
+    const full = await df.sort('k').collect()
+    const top = await df.sort('k').head(1).collect()
+    expect(top.toArray()).toEqual(full.toArray().slice(0, 1))
+    expect(top.toArray()[0]!.id).toBe(1)
+  })
+})
+
+describe('fast-path correctness regressions', () => {
+  it('groupBy count skips nulls like generic agg', async () => {
+    const out = await DataFrame.fromRows([
+      { g: 'a', x: 1 },
+      { g: 'a', x: null },
+    ])
+      .groupBy('g')
+      .agg({ x: 'count' })
+      .collect()
+
+    expect(out.toArray()).toEqual([{ g: 'a', x: 1 }])
+  })
+
+  it('multi-key unique keeps null key rows', async () => {
+    const out = await DataFrame.fromRows([
+      { a: 'x', b: 'y', value: 1 },
+      { a: null, b: 'y', value: 2 },
+    ])
+      .unique(['a', 'b'])
+      .collect()
+
+    expect(out.toArray()).toEqual([
+      { a: 'x', b: 'y', value: 1 },
+      { a: null, b: 'y', value: 2 },
+    ])
+  })
+
+  it('unique distinguishes null from NaN', async () => {
+    const out = await DataFrame.fromColumns({
+      x: [Number.NaN, null],
+    })
+      .unique(['x'])
+      .collect()
+
+    expect(out.shape[0]).toBe(2)
+    const vals = out.toArray().map((r) => r.x)
+    expect(vals.some((v) => v === null)).toBe(true)
+    expect(vals.some((v) => typeof v === 'number' && Number.isNaN(v))).toBe(true)
+  })
+
+  it('semiJoin matches on fractional float keys', async () => {
+    const left = DataFrame.fromColumns({ k: new Float64Array([1.2]) })
+    const right = DataFrame.fromColumns({ k: new Float64Array([0.5, 1.2]) })
+    const out = await left.semiJoin(right, 'k').collect()
+    expect(out.toArray()).toEqual([{ k: 1.2 }])
+  })
 })
 
 describe('projectColumnNames', () => {
