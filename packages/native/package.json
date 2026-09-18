@@ -32,6 +32,6 @@
     }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4"
+    "@napi-rs/cli": "^3.10.0"
   }
 }
