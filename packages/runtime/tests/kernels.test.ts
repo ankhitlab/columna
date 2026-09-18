@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isValid, tableFromColumns } from '@columna/arrow'
+import { DataFrame, col } from '@columna/core'
 import type { ExprNode } from '../src/types.js'
 import { __setFusedCompile } from '../src/fused.js'
 import { roundHalfAway } from '../src/math.js'
@@ -161,6 +162,37 @@ describe('tryFastSort / tryFastJoin', () => {
     expect(sparse).not.toBeNull()
     expect(sparse!.numRows).toBe(2)
     expect([...(sparse!.columns.find((c) => c.field.name === 'v')!.data as Int32Array)]).toEqual([20, 30])
+  })
+})
+
+describe('top-k sort regressions', () => {
+  it('sorts category values lexically before head()', async () => {
+    const out = await DataFrame.fromColumns({
+      s: ['z', 'a'],
+      k: [1, 1],
+    })
+      .filter(col('k').gt(0))
+      .sort('s')
+      .head(1)
+      .collect()
+
+    expect(out.toArray()).toEqual([{ s: 'a', k: 1 }])
+  })
+
+  it('nullsLast does not drop null rows under limit', async () => {
+    const out = await DataFrame.fromColumns({
+      x: [null, 1],
+      k: [1, 1],
+    })
+      .filter(col('k').gt(0))
+      .sort(col('x').asc({ nullsLast: true }))
+      .head(2)
+      .collect()
+
+    expect(out.toArray()).toEqual([
+      { x: 1, k: 1 },
+      { x: null, k: 1 },
+    ])
   })
 })
 

@@ -578,16 +578,25 @@ export function tryFastSort(
 
   const n = table.numRows
 
-  // Top-k heap path: single numeric key only (existing behaviour); skip when nullsFirst.
-  if (limit !== undefined && limit > 0 && limit < n && by.length === 1 && keys[0]!.nullsLast) {
-    const col = getColumn(table, (by[0]!.expr as { type: 'col'; name: string }).name)
-    const data = numericView(col)
-    if (data) {
-      const idx = new Uint32Array(n)
-      for (let i = 0; i < n; i++) idx[i] = i
-      topKIndices(idx, data, col.nullBitmap, by[0]!.descending, limit)
-      return gather(table, idx.subarray(0, limit))
-    }
+  // Top-k heap path.
+  // Only when the key has no nulls: otherwise the full sort path is responsible
+  // for placing nulls according to nullsLast/nullsFirst.
+  if (
+    limit !== undefined &&
+    limit > 0 &&
+    limit < n &&
+    by.length === 1 &&
+    keys[0]!.nullsLast &&
+    !keys[0]!.nullBitmap
+  ) {
+    const key = keys[0]!
+
+    const idx = new Uint32Array(n)
+    for (let i = 0; i < n; i++) idx[i] = i
+
+    topKIndices(idx, key.codes, undefined, key.descending, limit)
+
+    return gather(table, idx.subarray(0, limit))
   }
 
   // Native Rayon argsort for large single-key numeric sorts (no limit / limit ≥ n).
@@ -2095,11 +2104,13 @@ export function tryFusedFilterSortLimit(
   if (limit <= 0) return gather(table, [])
   if (n === 0) return gather(table, [])
 
-  // One-pass top-k: cmp/vector filter ∧ single numeric column key (nulls last).
+  // One-pass top-k: cmp/vector filter ∧ single sort-key column (nulls last, no nulls).
   if (by.length === 1 && by[0]!.expr.type === 'col' && by[0]!.nullsLast !== false) {
     const col = getColumn(table, (by[0]!.expr as { type: 'col'; name: string }).name)
-    const data = numericView(col)
-    if (data) {
+    const sortKey = sortKeyCodes(col)
+
+    if (sortKey && !sortKey.nullBitmap) {
+      const data = sortKey.codes
       const resolved = resolveCmps(table, predicate)
       let mask: ReturnType<typeof evalVec> | null = null
       if (!resolved) {
@@ -2107,7 +2118,6 @@ export function tryFusedFilterSortLimit(
       }
       if (resolved || mask) {
         const descending = by[0]!.descending
-        const bitmap = col.nullBitmap
         const heapIdx = new Uint32Array(limit)
         const heapVal = new Float64Array(limit)
         let size = 0
@@ -2146,7 +2156,6 @@ export function tryFusedFilterSortLimit(
           if (resolved) {
             for (const r of resolved) if (!cmpAt(r, i)) continue outer
           } else if (!truthy(mask!, i)) continue
-          if (bitmap && !isValid(bitmap, i)) continue
           const v = data[i]!
           if (size < limit) {
             heapIdx[size] = i
