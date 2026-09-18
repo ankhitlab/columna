@@ -610,6 +610,15 @@ describe('optimizer correctness regressions', () => {
     expect([...exprColumnRefs(expr)].sort()).toEqual(['a', 'b'])
   })
 
+  it('filter under rename rewrites both sides of str.concat', async () => {
+    const out = await DataFrame.fromRows([{ a: 'A', b: 'B' }])
+      .rename({ a: 'x', b: 'y' })
+      .filter(col('x').str.concat(col('y')).eq('AB'))
+      .collect()
+
+    expect(out.toArray()).toEqual([{ x: 'A', y: 'B' }])
+  })
+
   it('select after isBetween keeps bound columns until predicate execution', async () => {
     const out = await DataFrame.fromRows([
       { x: 5, lo: 0, hi: 10 },

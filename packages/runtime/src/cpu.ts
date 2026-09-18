@@ -20,6 +20,7 @@ import {
 import type { AggKind, Backend, CorrMethod, ExecContext, ExprNode, JoinKind, PlanNode, QuantileMethod, RankMethod } from './types.js'
 import { parallelDualGtIndices, parallelTakeTable, parallelFilter, parallelSort, parallelGroupBy, parallelUnique, PARALLEL_FILTER_MIN_ROWS, PARALLEL_SORT_MIN_ROWS, PARALLEL_GROUPBY_MIN_ROWS, PARALLEL_UNIQUE_MIN_ROWS } from './parallel.js'
 import { optimizePlan, joinOrderChanged, estimatePlanRows } from './optimize.js'
+import { exprSome, forEachChildExpr, mapExprChildren } from './expr_walk.js'
 import { tryLoadNativeKernels, NATIVE_JOIN_MIN_ROWS } from './native_kernels.js'
 import { orderRows, overAggregateNumeric, overCumulativeNumeric, partitionIds, type Partition } from './over.js'
 import {
@@ -381,61 +382,21 @@ function aggKey(inner: ExprNode): string | null {
 }
 
 function hasAgg(expr: ExprNode): boolean {
-  switch (expr.type) {
-    case 'col':
-    case 'lit':
-      return false
-    case 'agg':
-    case 'over':
-      return true
-    case 'binary':
-      return hasAgg(expr.left) || hasAgg(expr.right)
-    case 'isBetween':
-      return hasAgg(expr.expr) || hasAgg(expr.low) || hasAgg(expr.high)
-    case 'when':
-      return expr.branches.some((b) => hasAgg(b.when) || hasAgg(b.then)) || hasAgg(expr.otherwise)
-    default:
-      return hasAgg(expr.expr)
-  }
+  return exprSome(expr, (node) => node.type === 'agg' || node.type === 'over')
 }
 
 /** Every agg op requested on each inner expression in the tree — lets one pass serve mean + std + min … */
 function collectAggNeeds(expr: ExprNode, needs: Map<string, Set<AggKind>>): void {
-  switch (expr.type) {
-    case 'col':
-    case 'lit':
-      return
-    case 'agg': {
-      const key = aggKey(expr.expr)
-      if (key !== null) {
-        let set = needs.get(key)
-        if (!set) needs.set(key, (set = new Set()))
-        set.add(expr.op)
-      }
-      collectAggNeeds(expr.expr, needs)
-      return
+  if (expr.type === 'over') return // per-partition aggregates are computed separately (see rewriteOver)
+  if (expr.type === 'agg') {
+    const key = aggKey(expr.expr)
+    if (key !== null) {
+      let set = needs.get(key)
+      if (!set) needs.set(key, (set = new Set()))
+      set.add(expr.op)
     }
-    case 'over':
-      return // per-partition aggregates are computed separately (see rewriteOver)
-    case 'binary':
-      collectAggNeeds(expr.left, needs)
-      collectAggNeeds(expr.right, needs)
-      return
-    case 'isBetween':
-      collectAggNeeds(expr.expr, needs)
-      collectAggNeeds(expr.low, needs)
-      collectAggNeeds(expr.high, needs)
-      return
-    case 'when':
-      for (const b of expr.branches) {
-        collectAggNeeds(b.when, needs)
-        collectAggNeeds(b.then, needs)
-      }
-      collectAggNeeds(expr.otherwise, needs)
-      return
-    default:
-      collectAggNeeds(expr.expr, needs)
   }
+  forEachChildExpr(expr, (child) => collectAggNeeds(child, needs))
 }
 
 /**
@@ -664,25 +625,8 @@ function rewriteOver(expr: ExprNode, win: Window, ctx: BroadcastCtx): ExprNode {
     }
     case 'over':
       return rewriteAggs(expr, ctx)
-    case 'binary': {
-      const left = rec(expr.left)
-      const right = rec(expr.right)
-      return left === expr.left && right === expr.right ? expr : { ...expr, left, right }
-    }
-    case 'isBetween': {
-      const inner = rec(expr.expr)
-      const low = rec(expr.low)
-      const high = rec(expr.high)
-      return inner === expr.expr && low === expr.low && high === expr.high ? expr : { ...expr, expr: inner, low, high }
-    }
-    case 'when': {
-      const branches = expr.branches.map((b) => ({ when: rec(b.when), then: rec(b.then) }))
-      return { ...expr, branches, otherwise: rec(expr.otherwise) }
-    }
-    default: {
-      const inner = rec(expr.expr)
-      return inner === expr.expr ? expr : { ...expr, expr: inner }
-    }
+    default:
+      return mapExprChildren(expr, rec)
   }
 }
 

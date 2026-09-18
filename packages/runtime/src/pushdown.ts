@@ -1,68 +1,7 @@
 import type { ExprNode, PlanNode } from './types.js'
 import { collectLeafTables } from './types.js'
-
-/** Collect every column referenced by an expression.
- *
- * IMPORTANT: this function is used for correctness-sensitive optimizer decisions.
- * A newly added ExprNode variant must be handled explicitly.
- */
-export function exprColumnRefs(expr: ExprNode, out = new Set<string>()): Set<string> {
-  switch (expr.type) {
-    case 'col':
-      out.add(expr.name)
-      return out
-
-    case 'lit':
-      return out
-
-    case 'alias':
-    case 'cast':
-    case 'fillNull':
-    case 'agg':
-    case 'unary':
-    case 'dt':
-    case 'clip':
-    case 'mapElements':
-    case 'isIn':
-    case 'rowOffset':
-      return exprColumnRefs(expr.expr, out)
-
-    case 'binary':
-      exprColumnRefs(expr.left, out)
-      exprColumnRefs(expr.right, out)
-      return out
-
-    case 'when':
-      for (const branch of expr.branches) {
-        exprColumnRefs(branch.when, out)
-        exprColumnRefs(branch.then, out)
-      }
-      exprColumnRefs(expr.otherwise, out)
-      return out
-
-    case 'isBetween':
-      exprColumnRefs(expr.expr, out)
-      exprColumnRefs(expr.low, out)
-      exprColumnRefs(expr.high, out)
-      return out
-
-    case 'str':
-      exprColumnRefs(expr.expr, out)
-      if (expr.other) exprColumnRefs(expr.other, out)
-      return out
-
-    case 'over':
-      exprColumnRefs(expr.expr, out)
-      for (const name of expr.partitionBy ?? []) out.add(name)
-      for (const name of expr.orderBy ?? []) out.add(name)
-      return out
-
-    default: {
-      const exhaustive: never = expr
-      return exhaustive
-    }
-  }
-}
+import { exprColumnRefs } from './expr_walk.js'
+export { exprColumnRefs } from './expr_walk.js'
 
 /**
  * Pure projection that preserves column identity and names.

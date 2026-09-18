@@ -9,9 +9,11 @@ import {
   projectColumnSubset,
   pushdownProjections,
 } from './pushdown.js'
+import { exprBlocksPushdown, renameColsInExpr } from './expr_walk.js'
 import { estimatePlanRows, splitAnd } from './stats.js'
 
 export { estimatePlanRows, splitAnd } from './stats.js'
+export { exprBlocksPushdown } from './expr_walk.js'
 
 const MAX_ROUNDS = 5
 
@@ -24,45 +26,6 @@ function combineAnd(parts: ExprNode[]): ExprNode | null {
   let acc = parts[0]!
   for (let i = 1; i < parts.length; i++) acc = andExpr(acc, parts[i]!)
   return acc
-}
-
-/**
- * True if expr must not be merged/pushed past filters or withColumn.
- * Barriers: mapElements, over, whole-column aggregates, and row-position ops (shift/offset).
- */
-export function exprBlocksPushdown(expr: ExprNode): boolean {
-  switch (expr.type) {
-    case 'mapElements':
-    case 'over':
-    case 'agg':
-    case 'rowOffset':
-      return true
-    case 'alias':
-    case 'cast':
-    case 'fillNull':
-    case 'unary':
-    case 'dt':
-    case 'clip':
-    case 'str':
-    case 'isIn':
-      return exprBlocksPushdown(expr.expr)
-    case 'isBetween':
-      return (
-        exprBlocksPushdown(expr.expr) ||
-        exprBlocksPushdown(expr.low) ||
-        exprBlocksPushdown(expr.high)
-      )
-    case 'binary':
-      return exprBlocksPushdown(expr.left) || exprBlocksPushdown(expr.right)
-    case 'when':
-      if (exprBlocksPushdown(expr.otherwise)) return true
-      for (const b of expr.branches) {
-        if (exprBlocksPushdown(b.when) || exprBlocksPushdown(b.then)) return true
-      }
-      return false
-    default:
-      return false
-  }
 }
 
 /**
@@ -172,50 +135,6 @@ function rewriteChildren(plan: PlanNode, rewrite: (p: PlanNode) => PlanNode): Pl
     default:
       if ('input' in plan && plan.input) return mapInput(plan, rewrite(plan.input))
       return plan
-  }
-}
-
-function renameColsInExpr(expr: ExprNode, mapName: (name: string) => string): ExprNode {
-  switch (expr.type) {
-    case 'col': {
-      const n = mapName(expr.name)
-      return n === expr.name ? expr : { type: 'col', name: n }
-    }
-    case 'binary':
-      return {
-        ...expr,
-        left: renameColsInExpr(expr.left, mapName),
-        right: renameColsInExpr(expr.right, mapName),
-      }
-    case 'unary':
-    case 'alias':
-    case 'cast':
-    case 'fillNull':
-    case 'agg':
-    case 'dt':
-    case 'clip':
-    case 'str':
-    case 'rowOffset':
-    case 'isIn':
-      return { ...expr, expr: renameColsInExpr(expr.expr, mapName) } as ExprNode
-    case 'isBetween':
-      return {
-        ...expr,
-        expr: renameColsInExpr(expr.expr, mapName),
-        low: renameColsInExpr(expr.low, mapName),
-        high: renameColsInExpr(expr.high, mapName),
-      }
-    case 'when':
-      return {
-        ...expr,
-        branches: expr.branches.map((b) => ({
-          when: renameColsInExpr(b.when, mapName),
-          then: renameColsInExpr(b.then, mapName),
-        })),
-        otherwise: renameColsInExpr(expr.otherwise, mapName),
-      }
-    default:
-      return expr
   }
 }
 
