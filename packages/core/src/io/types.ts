@@ -28,11 +28,20 @@ export type IoPolicy = {
   /** Default `['http:', 'https:']`. `file://` URLs are filesystem reads and follow `allowedDirs` instead. */
   allowedProtocols?: Array<'http:' | 'https:'>
   /**
-   * Reject loopback / RFC 1918 / link-local / ULA / cloud-metadata hosts written literally or as
-   * `localhost`. This is a name check, not DNS: a public name that resolves to a private address (DNS
-   * rebinding) is not caught — pass a `fetch` that resolves and checks addresses if that matters.
+   * Reject loopback / RFC 1918 / link-local / ULA / cloud-metadata hosts. The name is checked first (literal
+   * IPs, `localhost`, `*.internal`, …); then, on Node, the hostname is **resolved** (`dns.lookup`, every
+   * address) before each request and every hop of a redirect, and a public name that resolves to a private
+   * address is refused too. What this does not do is pin the connection to the checked address — a server
+   * that answers with a public address first and a private one on the next lookup (DNS rebinding TOCTOU)
+   * needs `fetch` built on a pinned dispatcher (see SECURITY.md) or an egress proxy. Browsers cannot resolve
+   * names; there only the name check applies.
    */
   denyPrivateHosts?: boolean
+  /**
+   * Resolver used by `denyPrivateHosts` (default on Node: `dns.promises.lookup(host, { all: true })`).
+   * Return every address the connection may use; `null` skips the address check for that host.
+   */
+  resolveHost?: (hostname: string) => Promise<string[] | null>
   /** Directories a path may live in (real paths are compared, so symlinks cannot escape). */
   allowedDirs?: string[]
   /** Maximum payload size in bytes; responses are read incrementally and cut off past the cap. */

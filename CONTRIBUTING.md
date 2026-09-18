@@ -46,3 +46,24 @@ pnpm --filter columna build
 ## Reporting issues
 
 Use the GitHub issue templates. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## Releasing
+
+Only `columna` is published; the `@columna/*` packages are bundled into it. A release is a tag:
+
+```bash
+pnpm release:prepare 0.3.0
+```
+
+bumps `package.json` / `packages/columna/package.json`, moves the `[Unreleased]` CHANGELOG entries under
+`## [0.3.0] - <date>` and checks the section is not empty. Then
+
+```bash
+git commit -am "Release 0.3.0" && git tag v0.3.0 && git push --follow-tags
+```
+
+[`release.yml`](.github/workflows/release.yml) refuses a tag whose version differs from `package.json` or has no
+CHANGELOG section, runs lint / build / typecheck / tests / the clean-consumer install, packs the tarball, creates the
+**GitHub Release** with the CHANGELOG section and the tarball's SHA-256, and — when the `NPM_TOKEN` repository
+secret exists — publishes to npm with provenance (`--provenance`, so the package page links back to the workflow
+run and commit). Pin consumers to the tag or the tarball hash, not to `main`.

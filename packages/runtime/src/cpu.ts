@@ -50,8 +50,16 @@ import {
   tryChunkedGroupBy,
   gather,
 } from './fast.js'
-import { memoryBudget, recordLiveBytes } from './memory.js'
-import { externalSortTable, joinTablesSpilled, needsSpill, uniqueTableSpilled } from './spill_ops.js'
+import { memoryBudget, recordLiveBytes, spillEnabled } from './memory.js'
+import {
+  externalSortTable,
+  externalSortTableAsync,
+  joinTablesSpilled,
+  joinTablesSpilledAsync,
+  needsSpill,
+  uniqueTableSpilled,
+  uniqueTableSpilledAsync,
+} from './spill_ops.js'
 import { spillRead, spillUnlink, spillWrite } from './spill.js'
 import { createFilterView, ensureMaterialized } from './views.js'
 import {
@@ -2578,7 +2586,9 @@ export class CpuBackend implements Backend {
   }
 
   async execute(plan: PlanNode, ctx?: ExecContext): Promise<TableView> {
-    if (ctx?.guard) return this.executeCooperative(plan, ctx)
+    // Cooperative unit-by-unit execution: for a guard (signal / deadline) and whenever a spill budget is
+    // active, so every sort / unique / join reaches this method as a root and can spill without blocking.
+    if (!ctx?.unit && (ctx?.guard || spillActive())) return this.executeCooperative(plan, ctx ?? { requested: 'cpu', strict: false, trace: () => undefined })
     const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
     const raw = plan
     plan = optimizePlan(plan)
@@ -2603,6 +2613,9 @@ export class CpuBackend implements Backend {
       })
       return table
     }
+    // Memory budget with spill: the async spill twins (fs/promises) keep the event loop free.
+    const spilled = await this.trySpillAsync(plan)
+    if (spilled) return done(spilled.table, spilled.kernel, spilled.reason)
     // B: parallel dual-gt + typed gather (helpers no-op to sync below thresholds)
     if (plan.type === 'filter') {
       const input = executeCpuNode(plan.input)
@@ -2661,7 +2674,7 @@ export class CpuBackend implements Backend {
    */
   private async executeCooperative(plan: PlanNode, ctx: ExecContext): Promise<TableView> {
     const guard = ctx.guard
-    const inner: ExecContext = { requested: ctx.requested, strict: ctx.strict, trace: ctx.trace }
+    const inner: ExecContext = { requested: ctx.requested, strict: ctx.strict, trace: ctx.trace, unit: true }
     const run = async (node: PlanNode): Promise<TableView> => {
       if (node.type === 'scan') return node.table
       checkGuard(guard, node.type)
@@ -2674,4 +2687,55 @@ export class CpuBackend implements Backend {
     }
     return run(optimizePlan(plan))
   }
+
+  /**
+   * Root sort / unique / join (and `project → join`) that would spill under the active memory budget: run the
+   * in-memory kernels over chunks with the async spill operators instead of the synchronous ones the sync
+   * executor uses. Returns null when the node does not spill (or is not one of these), so the caller falls
+   * through to the ordinary paths.
+   */
+  private async trySpillAsync(plan: PlanNode): Promise<{ table: TableView; kernel: string; reason: string } | null> {
+    if (!spillActive()) return null
+    const reason = 'memory budget: spilled through fs/promises (event loop stays free)'
+    if (plan.type === 'sort') {
+      const table = ensureMaterialized(executeCpuNode(plan.input))
+      // aggregate sort keys (broadcast temporaries) keep the sync path
+      if (plan.by.some((k) => broadcastAggregates(k.expr, table).table !== table)) return null
+      if (!needsSpill(table)) return null
+      return { table: await externalSortTableAsync(table, plan.by, undefined, sortTableInMemory, evalExprScalar, yieldToEventLoop), kernel: 'js:sort+spill', reason }
+    }
+    if (plan.type === 'unique') {
+      const table = ensureMaterialized(executeCpuNode(plan.input))
+      if (!needsSpill(table)) return null
+      const { columns, keep } = plan
+      return { table: await uniqueTableSpilledAsync(table, (chunk) => uniqueTableInMemory(chunk, columns, keep), yieldToEventLoop), kernel: 'js:unique+spill', reason }
+    }
+    const joinNode = plan.type === 'join' ? plan : plan.type === 'project' && plan.input.type === 'join' ? plan.input : null
+    if (joinNode && joinNode.how !== 'cross') {
+      const left = ensureMaterialized(executeCpuNode(joinNode.left))
+      const right = ensureMaterialized(executeCpuNode(joinNode.right))
+      const working = estimateTableBytes(left) + estimateTableBytes(right)
+      const budget = memoryBudget()
+      if (!(needsSpill(left) || needsSpill(right) || (budget !== undefined && working * 2 > budget))) return null
+      if (joinNode.validate) assertJoinValidate(left, right, joinNode.leftOn, joinNode.rightOn, joinNode.validate)
+      const { leftOn, rightOn, how } = joinNode
+      const lSuffix = joinNode.lSuffix ?? ''
+      const rSuffix = joinNode.rSuffix ?? '_right'
+      const keep = plan.type === 'project' ? requiredInputColumns(plan.columns) ?? undefined : undefined
+      const side = how === 'inner' || estimateTableBytes(right) >= estimateTableBytes(left) ? 'right' : 'left'
+      const joined = await joinTablesSpilledAsync(
+        left,
+        right,
+        (l, r) => joinTablesInMemory(l, r, leftOn, rightOn, how, lSuffix, rSuffix, keep),
+        side,
+      )
+      return { table: plan.type === 'project' ? project(ensureMaterialized(joined), plan.columns) : joined, kernel: 'js:join+spill', reason }
+    }
+    return null
+  }
+}
+
+/** A memory budget with spill enabled is active for this execution (Node only). */
+function spillActive(): boolean {
+  return spillEnabled() && memoryBudget() !== undefined
 }

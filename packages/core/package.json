@@ -67,7 +67,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "apache-arrow": "^21.2.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

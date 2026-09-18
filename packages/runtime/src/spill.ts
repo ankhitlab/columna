@@ -135,25 +135,7 @@ export function spillTempPath(prefix = 'run'): string {
 export function spillWrite(table: TableView, path?: string): string {
   const fs = nodeFs()
   const outPath = path ?? spillTempPath('tbl')
-  const parts: Uint8Array[] = []
-
-  const schemaJson = JSON.stringify(
-    table.schema.map((f) => ({ name: f.name, dtype: f.dtype, nullable: f.nullable })),
-  )
-  const schemaBytes = new TextEncoder().encode(schemaJson)
-
-  const header = new ArrayBuffer(20)
-  const hv = new DataView(header)
-  hv.setUint32(0, MAGIC, true)
-  hv.setUint32(4, VERSION, true)
-  hv.setUint32(8, table.numRows, true)
-  hv.setUint32(12, table.columns.length, true)
-  hv.setUint32(16, schemaBytes.byteLength, true)
-  parts.push(new Uint8Array(header), schemaBytes)
-
-  for (const col of table.columns) {
-    parts.push(...encodeColumn(col, table.numRows))
-  }
+  const parts = encodeTable(table)
 
   const total = parts.reduce((a, p) => a + p.byteLength, 0)
   const buf = new Uint8Array(total)
@@ -194,10 +176,84 @@ export function spillWrite(table: TableView, path?: string): string {
   return outPath
 }
 
+/** Header + schema + columns as separate parts (the async writer streams them; the sync writer concatenates). */
+function encodeTable(table: TableView): Uint8Array[] {
+  const parts: Uint8Array[] = []
+  const schemaJson = JSON.stringify(
+    table.schema.map((f) => ({ name: f.name, dtype: f.dtype, nullable: f.nullable })),
+  )
+  const schemaBytes = new TextEncoder().encode(schemaJson)
+  const header = new ArrayBuffer(20)
+  const hv = new DataView(header)
+  hv.setUint32(0, MAGIC, true)
+  hv.setUint32(4, VERSION, true)
+  hv.setUint32(8, table.numRows, true)
+  hv.setUint32(12, table.columns.length, true)
+  hv.setUint32(16, schemaBytes.byteLength, true)
+  parts.push(new Uint8Array(header), schemaBytes)
+  for (const col of table.columns) parts.push(...encodeColumn(col, table.numRows))
+  return parts
+}
+
+/**
+ * Non-blocking spill write: `fs/promises`, exclusive create + private mode, parts written one after another
+ * (no contiguous copy of the whole table). Used by the async spill operators the runtime takes when a memory
+ * budget is active; the event loop keeps turning while the disk works.
+ */
+export async function spillWriteAsync(table: TableView, path?: string): Promise<string> {
+  const fsp = require('node:fs/promises') as typeof import('node:fs/promises')
+  const outPath = path ?? spillTempPath('tbl')
+  const parts = encodeTable(table)
+  let total = 0
+  const handle = await fsp.open(outPath, 'wx', 0o600)
+  try {
+    for (const p of parts) {
+      // a part may sit on a SharedArrayBuffer (worker paths) — write a plain view of it
+      const view = p.buffer instanceof ArrayBuffer ? p : new Uint8Array(p)
+      let off = 0
+      while (off < view.byteLength) {
+        const { bytesWritten } = await handle.write(view, off, view.byteLength - off)
+        off += bytesWritten
+      }
+      total += p.byteLength
+    }
+    try {
+      await handle.chmod(0o600)
+    } catch {
+      /* Windows / unsupported */
+    }
+  } catch (err) {
+    await handle.close().catch(() => undefined)
+    await fsp.unlink(outPath).catch(() => undefined)
+    throw err
+  }
+  await handle.close()
+  recordSpilledBytes(total)
+  return outPath
+}
+
+export async function spillReadAsync(path: string): Promise<TableView> {
+  const fsp = require('node:fs/promises') as typeof import('node:fs/promises')
+  const file = await fsp.readFile(path)
+  return decodeTable(file instanceof Uint8Array ? file : new Uint8Array(file), path)
+}
+
+export async function spillUnlinkAsync(path: string): Promise<void> {
+  const fsp = require('node:fs/promises') as typeof import('node:fs/promises')
+  await fsp.unlink(path).catch(() => undefined)
+}
+
+export async function spillUnlinkManyAsync(paths: string[]): Promise<void> {
+  await Promise.all(paths.map((p) => spillUnlinkAsync(p)))
+}
+
 export function spillRead(path: string): TableView {
   const fs = nodeFs()
   const file = fs.readFileSync(path)
-  const buf = file instanceof Uint8Array ? file : new Uint8Array(file)
+  return decodeTable(file instanceof Uint8Array ? file : new Uint8Array(file), path)
+}
+
+function decodeTable(buf: Uint8Array, path: string): TableView {
   let off = 0
   const hv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   if (hv.getUint32(off, true) !== MAGIC) throw new Error(`spillRead: bad magic at ${path}`)

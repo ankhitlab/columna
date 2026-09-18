@@ -181,3 +181,55 @@ describe('path policy', () => {
     await expect(DataFrame.readCsv(join(DIR, 'ok.csv'))).rejects.toThrow(/outside allowedDirs/)
   })
 })
+
+describe('denyPrivateHosts resolves names (DNS rebinding, first half)', () => {
+  const ok = () => new Response('a,b\n1,2\n', { status: 200, headers: { 'content-type': 'text/csv' } })
+
+  it('a public-looking name that resolves to a private address is refused before fetch', async () => {
+    let fetched = 0
+    const fetchImpl = (async () => (fetched++, ok())) as unknown as typeof fetch
+    const resolveHost = async () => ['93.184.216.34', '10.0.0.5']
+    await expect(loadBytes('http://cdn.example.com/x.csv', { denyPrivateHosts: true, fetch: fetchImpl, resolveHost })).rejects.toThrow(
+      /resolves to 10\.0\.0\.5/,
+    )
+    expect(fetched).toBe(0)
+  })
+
+  it('a name resolving to public addresses is fetched; without denyPrivateHosts the resolver is not consulted', async () => {
+    let resolved = 0
+    let fetched = 0
+    const fetchImpl = (async () => (fetched++, ok())) as unknown as typeof fetch
+    const resolveHost = async () => (resolved++, ['93.184.216.34', '2606:2800:220:1:248:1893:25c8:1946'])
+    await loadBytes('http://cdn.example.com/x.csv', { denyPrivateHosts: true, fetch: fetchImpl, resolveHost })
+    expect(resolved).toBe(1)
+    expect(fetched).toBe(1)
+    await loadBytes('http://cdn.example.com/x.csv', { fetch: fetchImpl, resolveHost })
+    expect(resolved).toBe(1)
+  })
+
+  it('every redirect hop is resolved: a public first hop cannot bounce to a name that resolves privately', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (url: string) => {
+      calls.push(url)
+      if (url.startsWith('http://cdn.example.com/')) return new Response(null, { status: 302, headers: { location: 'http://internal.example.com/x.csv' } })
+      return ok()
+    }) as unknown as typeof fetch
+    const resolveHost = async (host: string) => (host === 'internal.example.com' ? ['192.168.1.20'] : ['93.184.216.34'])
+    await expect(loadBytes('http://cdn.example.com/x.csv', { denyPrivateHosts: true, fetch: fetchImpl, resolveHost })).rejects.toThrow(
+      /internal\.example\.com.*resolves to 192\.168\.1\.20/,
+    )
+    expect(calls).toEqual(['http://cdn.example.com/x.csv'])
+  })
+
+  it('the process-wide resolver is a floor: a per-call resolver cannot replace it', async () => {
+    const fetchImpl = (async () => ok()) as unknown as typeof fetch
+    setIoPolicy({ denyPrivateHosts: true, resolveHost: async () => ['127.0.0.2'] })
+    try {
+      await expect(loadBytes('http://cdn.example.com/x.csv', { fetch: fetchImpl, resolveHost: async () => ['93.184.216.34'] })).rejects.toThrow(
+        /resolves to 127\.0\.0\.2/,
+      )
+    } finally {
+      setIoPolicy({})
+    }
+  })
+})

@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pnpm test:coverage` (v8; CI prints the summary on the job page and uploads the HTML report),
   `pnpm docs:api` (typedoc over the `columna` entry points; CI artifact + GitHub Pages workflow),
   [docs/migrating.md](docs/migrating.md) (Arquero / Polars / pandas → columna).
+- Non-blocking spill: under a memory budget the runtime executes unit by unit and sort / unique / join spill through
+  `fs/promises` (`spillWriteAsync` / `spillReadAsync`, chunked writes); the event loop keeps turning, `{ signal }` is
+  honoured between units, kernels are reported as `js:sort+spill` / `js:unique+spill` / `js:join+spill`.
+- SQL `nRows` pushdown: single SELECT / WITH statements get `SELECT * FROM (…) AS __columna_q LIMIT n` (PostgreSQL,
+  MySQL, SQLite, ClickHouse) or `SET ROWCOUNT n` (SQL Server); `pushdown: false` opts out; unknown dialect / several
+  statements keep the client-side slice.
+- `denyPrivateHosts` now also resolves hostnames on Node (`dns.lookup`, all addresses, every redirect hop) and
+  refuses names that resolve to private addresses; `IoPolicy.resolveHost` swaps the resolver (process-wide one is a
+  floor). SECURITY.md documents connection pinning with an undici Agent for the rebinding TOCTOU.
+- Release tooling: `pnpm release:prepare <version>` (bumps versions, moves [Unreleased] → [version]),
+  `.github/workflows/release.yml` on `v*` tags (gates → GitHub Release with tarball + SHA-256 + CHANGELOG section →
+  npm publish with provenance when `NPM_TOKEN` exists).
+- README badges (CI, coverage via the Pages-hosted shields endpoint, npm, API reference, license).
+- Arrow interop tests moved to `packages/arrow-interop` (`pnpm test:interop`); `@columna/core` has no Arrow dev dependency.
 - Browser smoke: DuckDB-Wasm Arrow IPC exchange check; the strict WebGPU check uses exact i32 columns
   (the f64 refusal is its own check) so the browser job is green on runners that expose an adapter.
 

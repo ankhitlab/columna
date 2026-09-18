@@ -15,7 +15,18 @@ import {
 import type { ExprNode } from './types.js'
 import { encodeCompositeKey } from './composite_key.js'
 import { memoryBudget, recordLiveBytes, spillEnabled } from './memory.js'
-import { concatTables, spillRead, spillTempPath, spillUnlink, spillUnlinkMany, spillWrite } from './spill.js'
+import {
+  concatTables,
+  spillRead,
+  spillReadAsync,
+  spillTempPath,
+  spillUnlink,
+  spillUnlinkAsync,
+  spillUnlinkMany,
+  spillUnlinkManyAsync,
+  spillWrite,
+  spillWriteAsync,
+} from './spill.js'
 
 type SortKey = { expr: ExprNode; descending: boolean; nullsLast?: boolean }
 
@@ -74,6 +85,79 @@ export function externalSortTable(
   }
 }
 
+/** Async twin of {@link externalSortTable}: same runs + merge, disk I/O through fs/promises. */
+export async function externalSortTableAsync(
+  table: TableView,
+  by: SortKey[],
+  limit: number | undefined,
+  sortChunk: (chunk: TableView, by: SortKey[], limit?: number) => TableView,
+  evalRow: EvalRow,
+  yieldBetween?: () => Promise<void>,
+): Promise<TableView> {
+  const budget = memoryBudget()!
+  const chunkRows = chunkRowCount(table, budget)
+  const runs: string[] = []
+  try {
+    for (let start = 0; start < table.numRows; start += chunkRows) {
+      const end = Math.min(table.numRows, start + chunkRows)
+      const sorted = sortChunk(sliceTable(table, start, end), by)
+      runs.push(await spillWriteAsync(sorted, spillTempPath('sort')))
+      if (yieldBetween) await yieldBetween()
+    }
+    if (runs.length === 0) return tableFromColumns(table.columns.map((c) => takeColumn(c, [])))
+    if (runs.length === 1) {
+      const only = await spillReadAsync(runs[0]!)
+      return limit !== undefined ? sliceTable(only, 0, Math.min(limit, only.numRows)) : only
+    }
+    const tables: TableView[] = []
+    for (const p of runs) tables.push(await spillReadAsync(p))
+    return mergeSortedTables(tables, by, limit, evalRow)
+  } finally {
+    await spillUnlinkManyAsync(runs)
+  }
+}
+
+/** Async twin of {@link uniqueTableSpilled}. */
+export async function uniqueTableSpilledAsync(
+  table: TableView,
+  uniqueChunk: (chunk: TableView) => TableView,
+  yieldBetween?: () => Promise<void>,
+): Promise<TableView> {
+  const budget = memoryBudget()!
+  const chunkRows = chunkRowCount(table, budget)
+  const paths: string[] = []
+  try {
+    for (let start = 0; start < table.numRows; start += chunkRows) {
+      const end = Math.min(table.numRows, start + chunkRows)
+      paths.push(await spillWriteAsync(uniqueChunk(sliceTable(table, start, end)), spillTempPath('uniq')))
+      if (yieldBetween) await yieldBetween()
+    }
+    const partials: TableView[] = []
+    for (const p of paths) partials.push(await spillReadAsync(p))
+    return uniqueChunk(concatTables(partials))
+  } finally {
+    await spillUnlinkManyAsync(paths)
+  }
+}
+
+/** Async twin of {@link joinTablesSpilled} (also used for the non-inner "spill the larger side" path). */
+export async function joinTablesSpilledAsync(
+  left: TableView,
+  right: TableView,
+  joinFull: (left: TableView, right: TableView) => TableView,
+  side: 'left' | 'right' = 'right',
+): Promise<TableView> {
+  recordLiveBytes(estimateTableBytes(left) + estimateTableBytes(right))
+  const target = side === 'right' ? right : left
+  const path = await spillWriteAsync(target, spillTempPath(side === 'right' ? 'join-r' : 'join-l'))
+  try {
+    const reloaded = await spillReadAsync(path)
+    return side === 'right' ? joinFull(left, reloaded) : joinFull(reloaded, right)
+  } finally {
+    await spillUnlinkAsync(path)
+  }
+}
+
 function compareHead(
   tables: TableView[],
   cursors: number[],
@@ -106,7 +190,15 @@ function mergeSortedRuns(
   limit: number | undefined,
   evalRow: EvalRow,
 ): TableView {
-  const tables = runPaths.map((p) => spillRead(p))
+  return mergeSortedTables(
+    runPaths.map((p) => spillRead(p)),
+    by,
+    limit,
+    evalRow,
+  )
+}
+
+function mergeSortedTables(tables: TableView[], by: SortKey[], limit: number | undefined, evalRow: EvalRow): TableView {
   const cursors = tables.map(() => 0)
   const alive = tables.map((t) => t.numRows > 0)
   const maxOut = limit ?? Number.POSITIVE_INFINITY

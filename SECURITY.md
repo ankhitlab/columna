@@ -22,7 +22,40 @@ We aim to acknowledge reports promptly and will coordinate a fix and disclosure 
 ## Threat model notes
 
 - **Untrusted data files.** CSV / JSON / Parquet readers are pure JavaScript with bounds-checked typed arrays; malformed input raises an error or yields `null` cells, never out-of-bounds memory access. Column names are treated as data (every reader — CSV, JSON, Excel, Parquet, SQL, Kafka — builds rows through one primitive, `setRowField`): a column called `__proto__` or `constructor` becomes an ordinary property and cannot alter prototypes.
-- **Paths and URLs from outside the program.** Readers accept a bare string and guess whether it is content, a path or a URL; that guess is convenience, not a boundary. Server-side code must tag the source (`{ text }` / `{ path }` / `{ url }` or `mode`) and set a policy — `allowedHosts`, `denyPrivateHosts`, `allowedDirs`, `maxBytes`, `timeoutMs`, `signal` — per call or once via `setIoPolicy()` (a floor that per-call options cannot widen). Without a policy the library reads whatever the process can reach; that is the documented default, not a vulnerability. `denyPrivateHosts` blocks loopback/private/link-local **IP literals** (including IPv4-mapped IPv6 such as `[::ffff:127.0.0.1]`) and common private hostnames; it does **not** resolve DNS — pass a pinning `fetch` if rebinding is in scope.
+- **Paths and URLs from outside the program.** Readers accept a bare string and guess whether it is content, a path or a URL; that guess is convenience, not a boundary. Server-side code must tag the source (`{ text }` / `{ path }` / `{ url }` or `mode`) and set a policy — `allowedHosts`, `denyPrivateHosts`, `allowedDirs`, `maxBytes`, `timeoutMs`, `signal` — per call or once via `setIoPolicy()` (a floor that per-call options cannot widen). Without a policy the library reads whatever the process can reach; that is the documented default, not a vulnerability. `denyPrivateHosts` blocks loopback/private/link-local **IP literals** (including IPv4-mapped IPv6 such as `[::ffff:127.0.0.1]`) and common private hostnames, and on Node also **resolves** every other hostname (`dns.lookup`, all addresses, before each request and each redirect hop) and refuses names that resolve to a private address. It does **not** pin the connection to the checked address, so a server that changes its answer between the check and the connect (DNS rebinding TOCTOU) is out of scope of the policy alone — see below.
+
+### DNS rebinding: pinning the connection
+
+The library resolves and checks; the HTTP client connects. To make both use the same address, give `IoPolicy.fetch` a client whose connector resolves once and connects to what it checked. With [undici](https://undici.nodejs.org) (the engine behind Node's `fetch`):
+
+```ts
+import { Agent, fetch as undiciFetch } from 'undici'
+import { lookup } from 'node:dns/promises'
+import { setIoPolicy } from 'columna'
+
+const isPrivate = (ip: string) => /^(10.|127.|0.|169.254.|192.168.|172.(1[6-9]|2d|3[01]).|100.(6[4-9]|[7-9]d|1[01]d|12[0-7]).|::1$|f[cd]|fe[89ab])/i.test(ip)
+
+const pinned = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      lookup(hostname, { all: true }).then((all) => {
+        const bad = all.find((a) => isPrivate(a.address))
+        if (bad) return callback(new Error(`refusing ${hostname}: resolves to ${bad.address}`), '', 4)
+        const a = all[0]!
+        callback(null, a.address, a.family) // the connection is made to exactly this address
+      }, (err) => callback(err, '', 4))
+    },
+  },
+})
+
+setIoPolicy({
+  denyPrivateHosts: true,
+  allowedHosts: ['*.example.com'],
+  fetch: (url, init) => undiciFetch(url, { ...init, dispatcher: pinned }) as unknown as Promise<Response>,
+})
+```
+
+An egress proxy that applies the same rule is the equivalent at the network layer. `IoPolicy.resolveHost` lets you swap the resolver the policy check uses (a process-wide one is a floor per-call options cannot replace); browsers cannot resolve names, so there only the name check applies.
 - **Excel input.** `readExcel` / `fromExcel` delegate to SheetJS, pinned to the patched build `xlsx@0.20.3` from cdn.sheetjs.com (the npm registry line stopped at 0.18.5, which carries CVE-2023-30533 prototype pollution and CVE-2024-22363 ReDoS). Keep the tarball URL in `packages/core/package.json` when bumping; do not downgrade to the npm `^0.18` line.
 - **Expression engine.** Fused arithmetic kernels are compiled with `new Function` from a fixed grammar: column references become array indices and only numeric literals reach the generated source; string values never do. A CSP without `unsafe-eval` falls back to closures automatically.
 - **Formulas and designs.** `parseFormula` caps crossed factors (`a*b*…`) at 12 so a hostile formula cannot expand to 2^k terms; DOE constructors validate their inputs before building matrices.

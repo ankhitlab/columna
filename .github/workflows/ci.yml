@@ -30,6 +30,8 @@ jobs:
       - run: pnpm typecheck
       - if: matrix.node-version != 22
         run: pnpm test
+      # Arrow IPC interop against apache-arrow (its own package + config; the core suite has no Arrow dependency)
+      - run: pnpm test:interop
       # Node 22 also measures coverage: summary into the job page, full HTML report as an artifact.
       - if: matrix.node-version == 22
         run: pnpm test:coverage

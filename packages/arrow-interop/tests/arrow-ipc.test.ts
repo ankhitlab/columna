@@ -35,7 +35,7 @@ import {
   tableToIPC,
   vectorFromArray,
 } from 'apache-arrow'
-import { DataFrame } from '../src/index.js'
+import { DataFrame } from '@columna/core'
 
 const rows = [
   { f: 1.5, i: -3, u: 7, b: true, s: 'alpha', c: 'x', d: Date.UTC(2024, 0, 1) },
@@ -255,6 +255,42 @@ describe('Polars (Rust Arrow) fixtures — independent of apache-arrow JS', () =
       const df = DataFrame.fromArrowIpc(bytes)
       expect(df.dtypes).toEqual({ f: 'f64', i8: 'i32', u64: 'f64', s: 'utf8', c: 'category', e: 'category', d: 'datetime', day: 'datetime', b: 'bool' })
       expect(df.toArray()).toEqual(want)
+    })
+  }
+})
+
+describe('seeded random frames through apache-arrow and back', () => {
+  function mulberry32(seed: number) {
+    let a = seed >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+  const randomRows = (seed: number, n: number) => {
+    const rnd = mulberry32(seed)
+    const groups = ['a', 'b', 'c', '', 'ünï', 'x"y']
+    return Array.from({ length: n }, (_, id) => ({
+      id,
+      k: Math.floor(rnd() * 7),
+      g: groups[Math.floor(rnd() * groups.length)]!,
+      s: rnd() < 0.3 ? 'dup' : `s${Math.floor(rnd() * 5000)}`,
+      f: rnd() < 0.15 ? null : Math.round((rnd() - 0.5) * 1e6) / 1000,
+      i: rnd() < 0.1 ? null : Math.floor((rnd() - 0.5) * 2 ** 32),
+      b: rnd() < 0.5,
+      'we ird,name': rnd(),
+    }))
+  }
+  for (const seed of [1, 2, 3]) {
+    it(`seed ${seed}: our writer → apache-arrow → its file writer → our reader is the identity`, () => {
+      const rows = randomRows(seed, 1500)
+      const df = DataFrame.fromRows(rows)
+      const back = DataFrame.fromArrowIpc(tableToIPC(tableFromIPC(df.toArrowIpc({ batchRows: 400 })), 'file'))
+      expect(back.toArray()).toEqual(rows)
+      expect(back.dtypes).toEqual(df.dtypes)
     })
   }
 })

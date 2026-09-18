@@ -14,6 +14,8 @@ import type {
 } from './types.js'
 import { setRowField } from '@columna/arrow'
 import { resolveDialect } from './util.js'
+import { applyRowLimit } from './limit.js'
+export { applyRowLimit, isSingleSelect } from './limit.js'
 
 export type {
   ReadSqlOptions,
@@ -86,9 +88,12 @@ export async function readSqlRows(
   options: ReadSqlOptions = {},
 ): Promise<Record<string, unknown>[]> {
   const limit = options.nRows
+  const limited = (dialect: SqlDialect | undefined): string =>
+    limit !== undefined && options.pushdown !== false ? applyRowLimit(sql, limit, dialect).sql : sql
 
   if (isSqlClient(connection)) {
-    const rows = (await connection.query(sql, options.params)).map(normalizeSqlRow)
+    // a duck-typed client has no dialect of its own: pushdown only when the caller names one
+    const rows = (await connection.query(limited(options.dialect), options.params)).map(normalizeSqlRow)
     return limit !== undefined ? rows.slice(0, limit) : rows
   }
 
@@ -96,7 +101,7 @@ export async function readSqlRows(
   const dialect = resolveDialect(config, options.dialect)
   const client = await openClient(config, dialect)
   try {
-    const rows = (await client.query(sql, options.params)).map(normalizeSqlRow)
+    const rows = (await client.query(limited(dialect), options.params)).map(normalizeSqlRow)
     return limit !== undefined ? rows.slice(0, limit) : rows
   } finally {
     if (!config.keepAlive && client.close) await client.close()

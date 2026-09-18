@@ -31,7 +31,9 @@
     "bench:e2e": "pnpm --filter @columna/bench run e2e",
     "bench:advanced": "pnpm --filter @columna/bench run advanced && pnpm --filter @columna/bench run advanced:python && pnpm --filter @columna/bench run advanced:report",
     "test:coverage": "vitest run --coverage",
-    "docs:api": "typedoc"
+    "docs:api": "typedoc",
+    "release:prepare": "node scripts/release-prepare.mjs",
+    "test:interop": "vitest run --config vitest.interop.config.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

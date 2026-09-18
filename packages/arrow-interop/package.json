@@ -1,0 +1,13 @@
+{
+  "name": "@columna/arrow-interop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Apache Arrow IPC interop suite: columna's dependency-free IPC against apache-arrow (JS) and Polars-written fixtures. Kept apart so the core test suite has no Arrow dependency.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config ../../vitest.interop.config.ts"
+  },
+  "devDependencies": {
+    "apache-arrow": "^21.2.0"
+  }
+}

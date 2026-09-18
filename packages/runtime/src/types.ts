@@ -307,6 +307,8 @@ export interface ExecContext {
   trace(event: ExecutionEvent): void
   /** Cancellation / deadline guard (`collect({ signal, timeoutMs })`); the CPU engine yields between operators when set. */
   readonly guard?: import('./cancel.js').ExecGuard
+  /** Set by the cooperative executor on the context it hands to each execution unit (prevents re-entry). */
+  readonly unit?: boolean
 }
 
 /** Options accepted by `collect()`, `collectWithReport()` and `Runtime.execute()`. */

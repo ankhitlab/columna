@@ -253,6 +253,37 @@ async function readNodeFile(path: string, opts: IoLoadOptions): Promise<Uint8Arr
   return new Uint8Array(await fs.readFile(path, { signal: combinedSignal(opts) }))
 }
 
+/** Default resolver: Node's dns.lookup over every address family; null off Node (browsers cannot resolve). */
+async function defaultResolveHost(hostname: string): Promise<string[] | null> {
+  if (typeof process === 'undefined' || !process.versions?.node) return null
+  const id = 'node:dns/promises' // opaque to bundlers
+  const dns = (await import(/* @vite-ignore */ id)) as typeof import('node:dns/promises')
+  const found = await dns.lookup(hostname, { all: true, verbatim: true })
+  return found.map((a) => a.address)
+}
+
+/**
+ * `denyPrivateHosts`, second half: a public-looking name must not resolve to a private address. Literal IPs
+ * were already judged by the name check. Runs for every hop of a redirect.
+ */
+async function checkResolvedAddresses(url: URL, opts: IoLoadOptions): Promise<void> {
+  if (!(globalPolicy.denyPrivateHosts || opts.denyPrivateHosts)) return
+  const host = stripBrackets(url.hostname)
+  if (ipv4Octets(host) || host.includes(':')) return // literal address: already checked
+  // the process-wide resolver is a floor: a per-call resolver cannot replace it
+  const resolve = globalPolicy.resolveHost ?? opts.resolveHost ?? defaultResolveHost
+  let addresses: string[] | null
+  try {
+    addresses = await resolve(host)
+  } catch (err) {
+    throw new Error(`IO policy: cannot resolve host "${host}": ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (!addresses) return
+  for (const a of addresses) {
+    if (isDeniedPrivateHost(a)) throw new Error(`IO policy: host "${host}" resolves to ${a}, a loopback / private / link-local address`)
+  }
+}
+
 async function fetchBytes(href: string, opts: IoLoadOptions): Promise<Uint8Array> {
   const fetchImpl = opts.fetch ?? globalPolicy.fetch ?? fetch
   const maxRedirects = opts.maxRedirects ?? globalPolicy.maxRedirects ?? 5
@@ -263,6 +294,7 @@ async function fetchBytes(href: string, opts: IoLoadOptions): Promise<Uint8Array
   for (let hop = 0; ; hop++) {
     checkUrlPolicy(url, globalPolicy)
     checkUrlPolicy(url, opts)
+    await checkResolvedAddresses(url, opts)
     const res = await fetchImpl(url.href, { redirect: 'manual', signal })
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
       if (hop >= maxRedirects) throw new Error(`IO policy: too many redirects fetching ${href}`)

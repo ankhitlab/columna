@@ -54,9 +54,13 @@ export type ReadSqlOptions = {
   /** Force dialect when it cannot be inferred from the URL. */
   dialect?: SqlDialect
   /**
-   * Maximum rows in the returned DataFrame. The driver's full result set is still fetched and buffered — this is
-   * a slice after the fact, never a LIMIT pushdown. To bound the query, transfer and driver memory, put LIMIT /
-   * TOP / FETCH FIRST in the SQL itself.
+   * Maximum rows in the returned DataFrame. When the dialect is known (URL / config, or `dialect` given with a
+   * duck-typed client) and the text is a single SELECT / WITH statement, the limit is **pushed into the query**
+   * (`SELECT * FROM (…) AS __columna_q LIMIT n`; SQL Server: `SET ROWCOUNT n`), so the database, the transfer
+   * and the driver's buffer are bounded too. Otherwise — several statements, EXEC, unknown dialect, or
+   * `pushdown: false` — the buffered result is sliced after the fact.
    */
   nRows?: number
+  /** Set to `false` to keep the SQL untouched and slice the result instead (default: push when possible). */
+  pushdown?: boolean
 }

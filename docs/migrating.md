@@ -30,7 +30,7 @@ out.toArray()
 | `.select('a', 'b')` / `.select(aq.not('c'))` | `.select('a', 'b')` / `.drop('c')` / `.exclude('c')` | |
 | `.rename({ a: 'b' })` | `.rename({ a: 'b' })` | Type of the frame follows the rename. |
 | `.groupby('g').rollup({ n: aq.op.count(), m: aq.op.mean('x') })` | `.groupBy('g').agg((c) => ({ n: c.x.count(), m: c.x.mean() }))` | Also `agg({ x: ['sum', 'mean'] })` → `x_sum`, `x_mean`; shortcuts `.groupBy('g').mean()`. |
-| `.orderby('a', aq.desc('b'))` | `.sort(['a', col('b').desc()])` | `nullsLast` per key. |
+| `.orderby('a', aq.desc('b'))` | `.sort('a', col('b').desc())` | `nullsLast` per key. |
 | `.join(other, ['k1', 'k2'])` / `join_left` | `.join(other, { on: 'k' })` / `.join(other, { on, how: 'left' })` | `how`: inner, left, right, outer, semi, anti, cross; `suffix`, `validate`. |
 | `.dedupe('a')` | `.unique(['a'])` | |
 | `.pivot('key', 'value')` / `.fold(['a', 'b'])` | `.pivot(...)` / `.melt(...)` | |
@@ -74,7 +74,7 @@ core, i64 / nested types and the streaming engine.
 | `df[df.age > 18]` | `df.filter((c) => c.age.gt(18))` | |
 | `df['y'] = df.a * 2` | `df.withColumn('y', col('a').mul(2))` | Frames are immutable; every step returns a new frame / plan. |
 | `df.groupby('g').agg(n=('x', 'count'), m=('x', 'mean'))` | `df.groupBy('g').agg({ x: ['count', 'mean'] })` | |
-| `df.sort_values(['a', 'b'], ascending=[True, False])` | `df.sort(['a', col('b').desc()])` | |
+| `df.sort_values(['a', 'b'], ascending=[True, False])` | `df.sort('a', col('b').desc())` | |
 | `df.merge(other, on='k', how='left')` | `df.join(other, { on: 'k', how: 'left' })` | |
 | `df.drop_duplicates(['a'])` | `df.unique(['a'])` | |
 | `df.pivot_table` / `df.melt` | `df.pivot` / `df.melt` | |

@@ -4,9 +4,15 @@
 
 # columna
 
+[![CI](https://github.com/ankhitlab/columna/actions/workflows/ci.yml/badge.svg)](https://github.com/ankhitlab/columna/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fankhitlab.github.io%2Fcolumna%2Fcoverage.json)](https://github.com/ankhitlab/columna/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/columna)](https://www.npmjs.com/package/columna)
+[![API reference](https://img.shields.io/badge/API-reference-blue)](https://ankhitlab.github.io/columna/)
+[![license](https://img.shields.io/npm/l/columna)](LICENSE)
+
 Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary required. The engine (`@columna/arrow`, `@columna/runtime`) and the statistics (`@columna/advanced`) have no third-party runtime dependencies; `columna` / `@columna/core` add four IO packages (hyparquet ×3 for Parquet, SheetJS for Excel) that load lazily on first use — see [Packages](#packages). Speaks **Apache Arrow IPC** to DuckDB, Polars, pyarrow and `apache-arrow`.
 
-API reference: [docs/api](docs/api/index.html) (`pnpm docs:api`; published by CI on GitHub Pages). Coming from Arquero / Polars / pandas: [docs/migrating.md](docs/migrating.md).
+API reference: [ankhitlab.github.io/columna](https://ankhitlab.github.io/columna/) (`pnpm docs:api`; published by CI on GitHub Pages). Coming from Arquero / Polars / pandas: [docs/migrating.md](docs/migrating.md).
 
 The DataFrame part competes with Arquero (same job; on 2M rows columna is 5–10× faster per operation and uses ~3× less memory), overlaps with DuckDB-Wasm (which is a real SQL engine and reads files faster) and is not a substitute for Polars or DuckDB native when a server can run one. What none of them have is the statistics layer: ~250 procedures — hypothesis tests, ANOVA, regression with full diagnostics, DOE, SPC, capability, reliability, time series, multivariate — each checked against scipy / numpy / NIST references. Measured comparison and an honest "when to use what": [docs/positioning.md](docs/positioning.md).
 
@@ -656,6 +662,10 @@ of the operation (a sort or join materialises index arrays; a groupBy its accumu
 - **Soft budget + spill (Node):** `setMemoryPolicy({ maxBytes, spillDir? })` or `collect({ memory: { maxBytes } })`.
   When live estimates exceed the budget, sort / unique / join write columnar temp files under `spillDir`
   (default `os.tmpdir()/columna-spill`) and merge back; `collectWithReport()` exposes `spilledBytes` / `peakBytes`.
+  Under a budget `collect()` runs unit by unit and the spilling operators use `fs/promises` (chunked writes, no
+  contiguous copy), so the event loop keeps turning while the disk works and `{ signal }` is honoured between
+  units; the report names the kernel (`js:sort+spill`, `js:unique+spill`, `js:join+spill`). Only the synchronous
+  `executeCpu()` helpers still spill with blocking I/O.
   Spill is off in the browser (`spill: true` throws).
 - **`persist()` / `unpersist()`:** cache a collected plan by structural hash (LRU capped by `maxCacheBytes`);
   subsequent identical collects set `report.cacheHit`. Nothing is cached unless you call `persist()`.
@@ -670,8 +680,10 @@ of the operation (a sort or join materialises index arrays; a groupBy its accumu
   builds the whole string.
 - **JSON / Excel / Parquet in**: still whole-file → row objects → columns (Parquet no longer copies the input buffer). Budget
   roughly 3–5× the file size in peak RSS for these.
-- **SQL**: `nRows` slices the driver's result **after** it arrived — it bounds the DataFrame, not the query, the transfer
-  or the driver's buffer. Put `LIMIT` in the SQL for that.
+- **SQL**: `nRows` is **pushed into the query** when the dialect is known and the text is one SELECT / WITH statement
+  (`SELECT * FROM (…) AS __columna_q LIMIT n`; SQL Server `SET ROWCOUNT n`), bounding the database work, the transfer and
+  the driver's buffer. Several statements, `EXEC`, a duck-typed client without `dialect`, or `pushdown: false` fall back
+  to slicing the buffered result — then only the DataFrame is bounded.
 - **Browser**: WebGPU / WASM do not make the main thread asynchronous; a 10M-row groupBy blocks the UI for as long as it
   takes. Measure bundle size, device init (`await init()`) and main-thread blocking, not only kernel time.
 
@@ -687,12 +699,16 @@ GPU results are **bit-identical to the CPU**: the filter kernel compares `i32` /
 - **check** (Node 18 / 20 / 22): lint, build, typecheck (including the type-level schema tests), the vitest suite —
   fixtures against scipy / numpy / NIST, property and Monte-Carlo tests, the adversarial statistics set, the
   data-invariant suite (seeded random frames: partition identities, format round-trips CSV / JSON / parquet-like /
-  Arrow-like / Arrow IPC, requested-vs-actual engine equivalence), the Arrow IPC interop suite (against
-  `apache-arrow` and Polars-written fixtures), cooperative-cancellation equivalence, and CI-sized stress
+  Arrow-like / Arrow IPC, requested-vs-actual engine equivalence), cooperative-cancellation equivalence, async
+  spill equivalence, and CI-sized stress
   identities (`pnpm test:stress`: nulls, joins, sortMulti, CSV round-trip, spill). Node 22 also runs the suite
   under **v8 coverage**: the summary is printed on the job page and the HTML report is uploaded as the
   `coverage` artifact (`pnpm test:coverage` locally; at the time of writing 82 % of lines / 80 % of branches /
-  87 % of functions over the published packages' `src/`).
+  87 % of functions over the published packages' `src/`). `pnpm test:interop` runs the Arrow IPC interop suite
+  (`packages/arrow-interop`: against `apache-arrow` and Polars-written fixtures) — its own package and config, so the
+  core suite carries no Arrow dependency.
+- **release** (on a `vX.Y.Z` tag): the same gates, then a GitHub Release with the packed tarball, its SHA-256 and the
+  CHANGELOG section, and npm publish with provenance — see [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 - **docs**: the API reference is generated with typedoc from the `columna` entry points and uploaded as the
   `api-reference` artifact; the `pages` workflow publishes it to GitHub Pages on every push to `main`.
 - **consumer**: `pnpm pack` of every published package installed with npm into a clean project; ESM, CommonJS, the

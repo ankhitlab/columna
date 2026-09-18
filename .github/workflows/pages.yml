@@ -31,6 +31,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm docs:api
+      # coverage badge next to the API reference: README embeds it through shields.io/endpoint
+      - run: pnpm test:coverage
+      - run: node scripts/coverage-summary.mjs coverage/coverage-summary.json --badge docs/api/coverage.json
       - uses: actions/configure-pages@v5
         with:
           enablement: true

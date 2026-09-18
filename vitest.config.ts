@@ -6,6 +6,8 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     include: ['packages/**/src/**/*.test.ts', 'packages/**/tests/**/*.test.ts'],
+    // the Arrow interop suite has its own config + dependency (pnpm test:interop)
+    exclude: ['**/node_modules/**', 'packages/arrow-interop/**'],
     coverage: {
       // `pnpm test:coverage` — CI prints the summary into the job summary and uploads the full report.
       provider: 'v8',
