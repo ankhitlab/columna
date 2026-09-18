@@ -129,13 +129,14 @@ export async function withMemoryPolicyAsync<T>(
   const hasOverride = override !== undefined && Object.keys(override).length > 0
 
   // Browser has no portable AsyncLocalStorage equivalent.
-  // Do not silently mix per-call overrides.
-  if (!hasOverride) {
-    return fn()
-  }
-
+  // Refuse concurrent/nested scopes so a plain collect cannot inherit another
+  // call's override via activeState().
   if (browserOverrideState) {
     throw new Error('Concurrent collect({ memory }) overrides are not supported in the browser')
+  }
+
+  if (!hasOverride) {
+    return fn()
   }
 
   browserOverrideState = state
@@ -205,7 +206,16 @@ export function getExecMemoryStats(): {
   }
 }
 
+let forceBrowserMemoryPathForTests = false
+
+/** Test-only: exercise the browser override path under Node. */
+export function __forceBrowserMemoryPathForTests(on: boolean): void {
+  forceBrowserMemoryPathForTests = on
+  browserOverrideState = null
+}
+
 export function isNode(): boolean {
+  if (forceBrowserMemoryPathForTests) return false
   return typeof process !== 'undefined' && !!process.versions?.node
 }
 

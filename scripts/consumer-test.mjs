@@ -73,10 +73,18 @@ console.log(run(process.execPath, ['esm.mjs'], app).trim())
 writeFileSync(path.join(app, 'cjs.cjs'), `
 const { DataFrame, col } = require('columna')
 const { normal } = require('columna/advanced')
-DataFrame.fromRows([{ a: 1 }, { a: 2 }]).filter(col('a').gt(1)).collect().then((f) => {
+;(async () => {
+  const f = await DataFrame.fromRows([{ a: 1 }, { a: 2 }]).filter(col('a').gt(1)).collect()
   if (f.shape[0] !== 1) throw new Error('cjs filter')
   if (Math.abs(normal().cdf(1.96) - 0.9750021048517795) > 1e-12) throw new Error('cjs advanced')
+  // CJS + spill: createRequire must not see empty import.meta.url
+  await DataFrame.fromColumns({ x: new Float64Array([3, 2, 1]) })
+    .sort('x')
+    .collect({ memory: { maxBytes: 1 } })
   console.log('cjs ok')
+})().catch((err) => {
+  console.error(err)
+  process.exit(1)
 })
 `)
 console.log(run(process.execPath, ['cjs.cjs'], app).trim())

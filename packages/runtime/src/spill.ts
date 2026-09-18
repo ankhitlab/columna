@@ -19,18 +19,37 @@ import { recordSpilledBytes, resolveSpillDir } from './memory.js'
  */
 let nodeRequire: NodeJS.Require | null = null
 
+/**
+ * Filename / URL passed to `createRequire`.
+ * tsup's CJS build leaves `import.meta` empty (`{}`), so `import.meta.url` is undefined —
+ * fall back to `process.execPath` (any absolute path works for `node:` builtins).
+ */
+function createRequireFilename(): string {
+  try {
+    const url = import.meta.url
+    if (typeof url === 'string' && url.length > 0) return url
+  } catch {
+    /* CJS / non-module */
+  }
+  return process.execPath
+}
+
+function bindNodeRequire(createRequire: typeof import('node:module').createRequire): NodeJS.Require {
+  return createRequire(createRequireFilename())
+}
+
 export async function ensureSpillSupport(): Promise<boolean> {
   if (nodeRequire) return true
   if (typeof process === 'undefined' || !process.versions?.node) return false
   const proc = process as NodeJS.Process & { getBuiltinModule?: (id: string) => unknown }
   if (typeof proc.getBuiltinModule === 'function') {
     const mod = proc.getBuiltinModule('node:module') as typeof import('node:module')
-    nodeRequire = mod.createRequire(import.meta.url)
+    nodeRequire = bindNodeRequire(mod.createRequire)
     return true
   }
   const id = 'node:module' // opaque to bundlers
   const mod = (await import(/* @vite-ignore */ id)) as typeof import('node:module')
-  nodeRequire = mod.createRequire(import.meta.url)
+  nodeRequire = bindNodeRequire(mod.createRequire)
   return true
 }
 
@@ -39,7 +58,9 @@ function require(id: string): unknown {
     // synchronous path on Node ≥ 20.16 / 22.3; older Node needs the awaited ensureSpillSupport()
     const proc = process as NodeJS.Process & { getBuiltinModule?: (id: string) => unknown }
     if (typeof proc.getBuiltinModule === 'function') {
-      nodeRequire = (proc.getBuiltinModule('node:module') as typeof import('node:module')).createRequire(import.meta.url)
+      nodeRequire = bindNodeRequire(
+        (proc.getBuiltinModule('node:module') as typeof import('node:module')).createRequire,
+      )
     }
   }
   if (!nodeRequire) throw new Error('spill: Node support not initialised (the runtime awaits ensureSpillSupport() before running under a memory budget)')

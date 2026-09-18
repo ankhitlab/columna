@@ -202,4 +202,29 @@ describe('memory-policy isolation', () => {
     expect(seenA).toBe(100)
     expect(seenB).toBe(200)
   })
+
+  it('browser path refuses plain collect while an override scope is active', async () => {
+    const { __forceBrowserMemoryPathForTests } = await import('../src/memory.js')
+    __forceBrowserMemoryPathForTests(true)
+    try {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+
+      const holding = withMemoryPolicyAsync({ maxBytes: 50, spill: false }, async () => {
+        await gate
+      })
+
+      await Promise.resolve()
+      await expect(withMemoryPolicyAsync(undefined, async () => 1)).rejects.toThrow(
+        /Concurrent collect\(\{ memory \}\)/,
+      )
+
+      release()
+      await holding
+    } finally {
+      __forceBrowserMemoryPathForTests(false)
+    }
+  })
 })
