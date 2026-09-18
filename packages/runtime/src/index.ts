@@ -9,6 +9,7 @@ import {
   type MemoryPolicy,
 } from './memory.js'
 import { ensureSpillSupport } from './spill.js'
+import { ExecutionAbortedError, checkGuard, makeGuard } from './cancel.js'
 import { lookupPersistCache, maybeStorePersist, type PersistLookup } from './persist.js'
 import { optimizePlan, joinOrderChanged } from './optimize.js'
 import {
@@ -20,6 +21,7 @@ import {
   type Backend,
   type EngineKind,
   type ExecContext,
+  type ExecuteOptions,
   type ExecutionEvent,
   type ExecutionReport,
   type PlanNode,
@@ -102,7 +104,7 @@ export class Runtime {
     return this.backends.get('cpu')!
   }
 
-  async execute(plan: PlanNode, opts?: { memory?: MemoryPolicy }): Promise<TableView> {
+  async execute(plan: PlanNode, opts?: ExecuteOptions): Promise<TableView> {
     return (await this.executeWithReport(plan, opts)).table
   }
 
@@ -112,14 +114,17 @@ export class Runtime {
    */
   async executeWithReport(
     plan: PlanNode,
-    opts?: { memory?: MemoryPolicy },
+    opts?: ExecuteOptions,
   ): Promise<{ table: TableView; report: ExecutionReport }> {
     const memory = opts?.memory ?? this.options.memory
+    const guard = makeGuard(opts)
+    checkGuard(guard, 'start')
     if (memory?.maxBytes || getMemoryPolicy().maxBytes) await ensureSpillSupport()
     return withMemoryPolicyAsync(memory, async () => {
       resetExecMemoryStats()
       const rawPlan = plan
       plan = optimizePlan(plan)
+      checkGuard(guard, 'optimize')
       const cached = lookupPersistCache(plan)
       if (cached) {
         const mem = getExecMemoryStats()
@@ -139,20 +144,21 @@ export class Runtime {
           },
         }
       }
-      return this.executeWithReportInner(plan, rawPlan)
+      return this.executeWithReportInner(plan, rawPlan, guard)
     })
   }
 
   private async executeWithReportInner(
     plan: PlanNode,
     rawPlan?: PlanNode,
+    guard?: ExecContext['guard'],
   ): Promise<{ table: TableView; report: ExecutionReport }> {
     const requested = this.options.engine
     const strict = this.options.strict
     const backend = this.chooseBackend(plan)
     const events: ExecutionEvent[] = []
     const fallbacks: ExecutionReport['fallbacks'] = []
-    const ctx: ExecContext = { requested, strict, trace: (e) => void events.push(e) }
+    const ctx: ExecContext = { requested, strict, trace: (e) => void events.push(e), guard }
     if (rawPlan && joinOrderChanged(rawPlan, plan)) {
       events.push({
         node: 'join',
@@ -188,13 +194,16 @@ export class Runtime {
       return { table, report }
     }
     const run = async (b: Backend): Promise<TableView> => {
+      checkGuard(guard, b.name)
       const r = b.execute(plan, ctx)
-      return r instanceof Promise ? r : Promise.resolve(r)
+      const table = r instanceof Promise ? await r : r
+      checkGuard(guard, 'finish')
+      return table
     }
     try {
       return finish(await run(backend), backend.name)
     } catch (err) {
-      if (err instanceof EngineStrictError) throw err
+      if (err instanceof EngineStrictError || err instanceof ExecutionAbortedError) throw err
       if (backend.name === 'cpu') throw err
       const reason = err instanceof Error ? err.message : String(err)
       if (strict) throw new EngineStrictError(backend.name, [`backend threw: ${reason}`])
@@ -232,6 +241,7 @@ export function setDefaultRuntime(runtime: Runtime): void {
 
 export * from './types.js'
 export * from './cpu.js'
+export { ExecutionAbortedError, yieldToEventLoop, type ExecGuard } from './cancel.js'
 export {
   setMemoryPolicy,
   getMemoryPolicy,

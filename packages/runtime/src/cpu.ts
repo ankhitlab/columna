@@ -20,6 +20,7 @@ import {
 import type { AggKind, Backend, CorrMethod, ExecContext, ExprNode, JoinKind, PlanNode, QuantileMethod, RankMethod } from './types.js'
 import { parallelDualGtIndices, parallelTakeTable, parallelFilter, parallelSort, parallelGroupBy, parallelUnique, PARALLEL_FILTER_MIN_ROWS, PARALLEL_SORT_MIN_ROWS, PARALLEL_GROUPBY_MIN_ROWS, PARALLEL_UNIQUE_MIN_ROWS } from './parallel.js'
 import { optimizePlan, joinOrderChanged, estimatePlanRows } from './optimize.js'
+import { checkGuard, executionUnit, yieldToEventLoop } from './cancel.js'
 import { exprSome, forEachChildExpr, mapExprChildren } from './expr_walk.js'
 import { encodeCompositeKey, type KeyPart } from './composite_key.js'
 import { tryLoadNativeKernels, NATIVE_JOIN_MIN_ROWS } from './native_kernels.js'
@@ -2577,6 +2578,7 @@ export class CpuBackend implements Backend {
   }
 
   async execute(plan: PlanNode, ctx?: ExecContext): Promise<TableView> {
+    if (ctx?.guard) return this.executeCooperative(plan, ctx)
     const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
     const raw = plan
     plan = optimizePlan(plan)
@@ -2650,5 +2652,26 @@ export class CpuBackend implements Backend {
       return done(table, info?.kernel ?? 'js:join', reason)
     }
     return done(executeCpu(plan))
+  }
+
+  /**
+   * `collect({ signal | timeoutMs })`: run the plan one execution unit at a time, bottom-up, yielding to the
+   * event loop and checking the guard between units. Each unit goes through the normal `execute` (same
+   * fused kernels, native / worker fast paths and trace events); only the boundaries between units are new.
+   */
+  private async executeCooperative(plan: PlanNode, ctx: ExecContext): Promise<TableView> {
+    const guard = ctx.guard
+    const inner: ExecContext = { requested: ctx.requested, strict: ctx.strict, trace: ctx.trace }
+    const run = async (node: PlanNode): Promise<TableView> => {
+      if (node.type === 'scan') return node.table
+      checkGuard(guard, node.type)
+      const { children, rebuild } = executionUnit(node)
+      const tables: PlanNode[] = []
+      for (const child of children) tables.push({ type: 'scan', table: await run(child) })
+      await yieldToEventLoop()
+      checkGuard(guard, node.type)
+      return this.execute(rebuild(tables), inner)
+    }
+    return run(optimizePlan(plan))
   }
 }

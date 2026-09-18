@@ -26,10 +26,12 @@ export { dt, daysBetween } from './datetime.js'
 export { openSqlClient, setIoPolicy, getIoPolicy, io } from './io/index.js'
 export type { IoPolicy, IoLoadOptions, IoSourceMode } from './io/types.js'
 export type { CsvWriteOptions } from './io/write.js'
-export type { ArrowLike, DType, Schema, TableView } from '@columna/arrow'
-export type { AggKind, CorrMethod, EngineKind, ExecutionEvent, ExecutionReport, JoinKind, MathOp, MemoryPolicy, PlanNode, QuantileMethod, RankMethod } from '@columna/runtime'
+export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
+export { toArrowIpc, fromArrowIpc } from '@columna/arrow'
+export type { AggKind, CorrMethod, EngineKind, ExecuteOptions, ExecutionEvent, ExecutionReport, JoinKind, MathOp, MemoryPolicy, PlanNode, QuantileMethod, RankMethod } from '@columna/runtime'
 export {
   EngineStrictError,
+  ExecutionAbortedError,
   formatExecutionReport,
   setMemoryPolicy,
   getMemoryPolicy,

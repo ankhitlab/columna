@@ -11,7 +11,7 @@ import type { IoSource, ReadCsvOptions, ReadExcelOptions, ReadJsonOptions, ReadP
 import type { ReadSqlOptions, SqlConnection } from './sql/types.js'
 import type { KafkaConnection, ReadKafkaOptions } from './kafka/types.js'
 
-export type { IoSource, ReadCsvOptions, ReadExcelOptions, ReadJsonOptions, ReadParquetOptions } from './types.js'
+export type { IoSource, IoLoadOptions, ReadCsvOptions, ReadExcelOptions, ReadJsonOptions, ReadParquetOptions } from './types.js'
 export type {
   ReadSqlOptions,
   SqlClient,

@@ -6,6 +6,14 @@ export default defineConfig({
     globals: false,
     environment: 'node',
     include: ['packages/**/src/**/*.test.ts', 'packages/**/tests/**/*.test.ts'],
+    coverage: {
+      // `pnpm test:coverage` — CI prints the summary into the job summary and uploads the full report.
+      provider: 'v8',
+      include: ['packages/*/src/**/*.ts'],
+      exclude: ['packages/bench/**', 'packages/browser-smoke/**', 'packages/studio/**', 'packages/native/**', '**/*.test.ts', '**/*.d.ts'],
+      reporter: ['text-summary', 'json-summary', 'html'],
+      reportsDirectory: 'coverage',
+    },
   },
   resolve: {
     alias: {

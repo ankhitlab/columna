@@ -28,10 +28,12 @@ export type {
   SqlDialect,
   SqlParams,
 } from '@columna/core'
-export type { ArrowLike, DType, Schema, TableView } from '@columna/arrow'
-export type { AggKind, CorrMethod, EngineKind, ExecutionEvent, ExecutionReport, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
+export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
+export { toArrowIpc, fromArrowIpc } from '@columna/arrow'
+export type { AggKind, CorrMethod, EngineKind, ExecuteOptions, ExecutionEvent, ExecutionReport, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
 export {
   EngineStrictError,
+  ExecutionAbortedError,
   formatExecutionReport,
   Runtime,
   getDefaultRuntime,

@@ -3,11 +3,17 @@
  * run.mjs (Playwright) reads it and fails the process on any `ok: false`.
  *
  * Checks: import has no side effects (no GPU before init), CSV → filter → groupBy → join → CSV round trip,
- * typed exactness (a late 2^31 widens), and — when the browser exposes WebGPU — the strict GPU engine
- * returning exactly the CPU rows plus an execution report naming the gpu kernel.
+ * typed exactness (a late 2^31 widens), Apache Arrow IPC exchanged with DuckDB-Wasm in both directions, and —
+ * when the browser exposes WebGPU — the strict GPU engine returning exactly the CPU rows plus an execution
+ * report naming the gpu kernel, and the f64 exactness refusal with its reason.
  */
+/// <reference types="vite/client" />
 import { DataFrame, col, init, isWebGpuAvailable, formatExecutionReport, EngineStrictError } from 'columna'
 import { quantile, ttest1 } from 'columna/advanced'
+import duckdbMvpWasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url'
+import duckdbMvpWorker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url'
+import duckdbEhWasm from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url'
+import duckdbEhWorker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url'
 
 type Check = { name: string; ok: boolean; detail?: string; ms?: number }
 const checks: Check[] = []
@@ -87,6 +93,36 @@ async function main(): Promise<void> {
     assert(d.dtypes.v === 'f64' && d.toArray().at(-1)!.v === 2147483648, JSON.stringify(d.dtypes))
   })
 
+  await check('Apache Arrow IPC: DuckDB-Wasm ingests toArrowIpc(); its Arrow result comes back through fromArrowIpc()', async () => {
+    const duckdb = await import('@duckdb/duckdb-wasm')
+    const bundle = await duckdb.selectBundle({
+      mvp: { mainModule: duckdbMvpWasm, mainWorker: duckdbMvpWorker },
+      eh: { mainModule: duckdbEhWasm, mainWorker: duckdbEhWorker },
+    })
+    const worker = new Worker(bundle.mainWorker!)
+    const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker)
+    try {
+      await db.instantiate(bundle.mainModule, bundle.pthreadWorker)
+      const conn = await db.connect()
+      await conn.insertArrowFromIPCStream(df.toArrowIpc(), { name: 'people' })
+      // DuckDB's own (C++) Arrow IPC writer → columna's reader, no apache-arrow in between
+      const sql = 'SELECT city, count(*)::INTEGER AS n, avg(salary) AS pay FROM people WHERE age > 30 GROUP BY city ORDER BY city'
+      const ipc = await conn.useUnsafe((bindings, id) => bindings.runQuery(id, sql))
+      const back = DataFrame.fromArrowIpc(ipc).toArray() as Array<{ city: string; n: number; pay: number }>
+      const ours = (await df.filter((c) => c.age.gt(30)).groupBy('city').agg((c) => ({ n: c.id.count(), pay: c.salary.mean() })).sort('city').collect()).toArray()
+      assert(back.length === 4 && ours.length === 4, `groups ${back.length} / ${ours.length}`)
+      for (let i = 0; i < 4; i++) {
+        assert(back[i]!.city === ours[i]!.city && back[i]!.n === ours[i]!.n, `row ${i}: ${JSON.stringify(back[i])} vs ${JSON.stringify(ours[i])}`)
+        assert(Math.abs(back[i]!.pay - ours[i]!.pay) < 1e-6 * Math.abs(ours[i]!.pay), `pay ${back[i]!.pay} vs ${ours[i]!.pay}`)
+      }
+      await conn.close()
+      return `${n.toLocaleString()} rows in, ${back.length} groups back, identical to columna's groupBy`
+    } finally {
+      await db.terminate()
+      worker.terminate()
+    }
+  })
+
   await check('advanced: quantile (Minitab) and one-sample t in the browser bundle', () => {
     const q = quantile([1, 2, 3, 4], 0.25)
     assert(q === 1.25, `quantile ${q}`)
@@ -95,8 +131,8 @@ async function main(): Promise<void> {
   })
 
   if (gpuReady) {
-    await check('WebGPU strict filter returns exactly the CPU rows; report names the gpu kernel', async () => {
-      const plan = df.filter((c) => c.age.gt(30).and(c.salary.gt(45_000)))
+    await check('WebGPU strict filter (exact i32 columns) returns exactly the CPU rows; report names the gpu kernel', async () => {
+      const plan = df.filter((c) => c.age.gt(30).and(c.id.lt(150_000)))
       const cpu = (await plan.engine('cpu').collect()).getColumn('id').toArray()
       const { frame, report: rep } = await plan.engine('webgpu', { strict: true }).collectWithReport()
       const gpu = frame.getColumn('id').toArray()

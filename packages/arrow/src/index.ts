@@ -641,3 +641,5 @@ export function fromArrowLike(arrow: ArrowLike): TableView {
   })
   return tableFromColumns(columns)
 }
+
+export { toArrowIpc, fromArrowIpc, type ArrowIpcWriteOptions } from './ipc.js'

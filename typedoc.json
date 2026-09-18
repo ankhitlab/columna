@@ -1,0 +1,17 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "columna API reference",
+  "entryPoints": ["packages/columna/src/index.ts", "packages/columna/src/core.ts", "packages/columna/src/advanced.ts"],
+  "tsconfig": "packages/columna/tsconfig.json",
+  "out": "docs/api",
+  "readme": "README.md",
+  "includeVersion": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "categorizeByGroup": true,
+  "navigation": { "includeCategories": true, "includeGroups": true },
+  "sort": ["kind", "alphabetical"],
+  "treatWarningsAsErrors": false,
+  "validation": { "notExported": false, "invalidLink": false, "notDocumented": false }
+}

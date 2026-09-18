@@ -32,9 +32,16 @@ are in the linked report.
 2. **Exactness as a contract.** Type inference widens instead of coercing (a late 2³¹ or "n/a" changes the
    column, never the value); `cast` refuses overflow; GPU kernels compare integers bit-exactly or decline;
    `engine(kind, { strict: true })` and `collectWithReport()` say which backend actually ran each node.
-3. **Small and dependency-free where it matters.** Core + runtime + advanced have zero runtime dependencies;
-   CSV / JSON / Arrow-like IO is built in; Parquet read/write (`hyparquet` / `hyparquet-writer`) and Excel (`xlsx`)
-   pull packages; SQL / Kafka drivers are optional peers. The same code runs in Node and the browser.
+3. **Small and dependency-free where it matters.** The engine (`@columna/arrow`, `@columna/runtime`) and
+   `@columna/advanced` have no third-party runtime dependencies; CSV / JSON / Arrow IPC IO is built in.
+   `@columna/core` / `columna` declare four IO packages — Parquet read/write (`hyparquet`,
+   `hyparquet-compressors`, `hyparquet-writer`) and Excel (`xlsx`) — loaded lazily on first use; SQL / Kafka
+   drivers are optional peers. The same code runs in Node and the browser.
+5. **Apache Arrow IPC without a dependency.** `toArrowIpc()` / `fromArrowIpc()` write and read the real IPC
+   stream / file formats (dictionary-encoded categories, timestamps, Utf8View on input), verified against
+   `apache-arrow`, Polars and DuckDB-Wasm. DataFrames move to DuckDB / Polars / pyarrow and back as bytes.
+6. **Cancellable, deadline-bounded execution.** `collect({ signal, timeoutMs })` checks between operators and
+   yields to the event loop so a UI stays responsive and an abort lands within one operator.
 4. **Explicit boundaries for server use.** IO policy (allowed hosts / directories, byte caps, timeouts,
    cancellation), formula-safe CSV export, prototype-safe row construction — documented in
    [SECURITY.md](../SECURITY.md).
@@ -71,9 +78,11 @@ are in the linked report.
 - **CSV reading without the native addon is the slower fused-JS path.** `@columna/native`'s Rayon parser
   brings the 107 MB compare-js load to ~280 ms; without it the fused single-thread scanner is markedly
   slower (see [comparison-js.md](comparison-js.md)). Both paths stay streaming and memory-bounded.
-- **Arrow interop is a JSON-shaped `ArrowLike`, not Arrow IPC.** Zero-copy exchange with DuckDB-Wasm or
-  Arrow-based tools is not available; conversion goes through JavaScript values. Apache Parquet **write** is
-  supported (`writeParquet` via hyparquet-writer); IPC is not.
+- **Arrow IPC is a copy, not shared memory.** `toArrowIpc()` serialises into a fresh buffer and `fromArrowIpc()`
+  copies into columna's own columns; there is no zero-copy Arrow memory model behind `DataFrame` (columns are
+  TypedArrays + validity bitmaps + dictionaries, close to Arrow but not Arrow buffers). Nested / decimal / binary
+  Arrow types and LZ4 / ZSTD-compressed batches are refused, not approximated.
+- **Cancellation is per operator, not per row.** A running kernel finishes before `collect({ signal })` rejects.
 - **No SQL.** Everything is method chains and expressions.
 - **Scale ceiling is process memory by default.** On Node you can set a soft budget (`MemoryPolicy.maxBytes`) so sort / unique / join / groupBy spill intermediates to disk instead of growing without bound; the browser has no spill path.
 

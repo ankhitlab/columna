@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apache Arrow IPC** (no dependency): `DataFrame.toArrowIpc({ format?: 'stream' | 'file', batchRows? })`,
+  `DataFrame.fromArrowIpc(bytes)`, `readArrowIpc(source)` / `writeArrowIpc(path)`, `LazyFrame.toArrowIpc()`;
+  `toArrowIpc` / `fromArrowIpc` on `TableView` from `@columna/arrow`. Writes Float64/32, Int32, UInt32, Bool, Utf8,
+  Dictionary<Int32, Utf8> (category), Timestamp(ms) (datetime); reads those plus Int8…Int64 / UInt8…UInt64,
+  Float16, LargeUtf8, Utf8View, Timestamp in any unit, Date32/64, Null, dictionary indices of any width, several
+  record batches and dictionary deltas. Interop suite against `apache-arrow` (dev dependency), committed Polars
+  fixtures (`tests/fixtures/polars-ipc.*`) and DuckDB-Wasm in the browser smoke.
+- `collect({ signal, timeoutMs })` / `collectWithReport(...)` / `Runtime.execute(plan, opts)`: cooperative
+  cancellation and deadlines checked before every operator; the CPU engine yields to the event loop between
+  execution units when a guard is present (fused units stay fused, each unit traced). Rejects with
+  `ExecutionAbortedError { reason: 'signal' | 'timeout', node, elapsedMs }`; never triggers an engine fallback.
+- `pnpm test:coverage` (v8; CI prints the summary on the job page and uploads the HTML report),
+  `pnpm docs:api` (typedoc over the `columna` entry points; CI artifact + GitHub Pages workflow),
+  [docs/migrating.md](docs/migrating.md) (Arquero / Polars / pandas → columna).
+- Browser smoke: DuckDB-Wasm Arrow IPC exchange check; the strict WebGPU check uses exact i32 columns
+  (the f64 refusal is its own check) so the browser job is green on runners that expose an adapter.
+
 - Analyst DX: sync `DataFrame.head` / `tail` (materialized peeks), `show` / `print` (markdown to console).
 - `ffill` / `bfill` plan nodes; `fillNull({ col: value })` per-column map overload.
 - `GroupBy.count` / `sum` / `mean` / `min` / `max` / `std` / `var` / `nunique` / `median` shortcuts; `agg({ col: ['sum','mean'] })` expands to `col_sum` / `col_mean`.
@@ -24,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `columna/advanced` DataFrame wrappers: `propTest`, `adfTest`, `kpssTest`, `ridge`, `lasso`, `ancova`, `ksTwoSample`; `formatReport(result, 'markdown' | 'html')` for t-test / ANOVA / OLS.
 
 ### Changed
+
+- `toArrow()` / `fromArrow()` are deprecated (they return / take columna's JSON `ArrowLike`, not Arrow):
+  use `toArrowLike()` / `fromArrowLike()`, or `toArrowIpc()` / `fromArrowIpc()` for Apache Arrow.
+- README / positioning no longer say "no runtime dependencies in the core": the engine and statistics packages have
+  none; `@columna/core` / `columna` declare the four lazily-loaded IO packages.
 
 - Positioning / Engines docs: native gather threshold 50k (not 250k); CSV compare-js ~280 ms with native; Parquet write and fused plan list updated; rule-based rewrite listed under offers (not full CBO under gaps); "multi-threaded engine" moved from a gap to an offer (threads accelerate individual heavy ops; not a morsel-driven parallel runtime).
 

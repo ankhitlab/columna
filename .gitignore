@@ -64,3 +64,5 @@ packages/browser-smoke/dist
 
 # Local-only IDE (not part of the public repository)
 packages/studio/
+coverage/
+docs/api/

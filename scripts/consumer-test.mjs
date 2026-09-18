@@ -50,7 +50,7 @@ console.log('installed:', Object.keys(installed.dependencies ?? {}).join(', '))
 
 // 3. ESM consumer
 writeFileSync(path.join(app, 'esm.mjs'), `
-import { DataFrame, col, init, setIoPolicy, formatExecutionReport } from 'columna'
+import { DataFrame, col, init, setIoPolicy, formatExecutionReport, ExecutionAbortedError, fromArrowIpc } from 'columna'
 import { ttest1, quantile } from 'columna/advanced'
 import { DataFrame as CoreDataFrame } from 'columna/core'
 import { writeFileSync } from 'node:fs'
@@ -65,6 +65,12 @@ if (!(t.pValue >= 0 && t.pValue <= 1)) throw new Error('ttest1')
 if (quantile([1, 2, 3, 4], 0.25) !== 1.25) throw new Error('quantile')
 if (typeof CoreDataFrame !== 'function') throw new Error('columna/core')
 await frame.writeCsv('out.csv')
+// Arrow IPC round trip through the packed package, and a pre-aborted collect
+const ipc = frame.toArrowIpc()
+if (DataFrame.fromArrowIpc(ipc).shape[0] !== 3 || fromArrowIpc(ipc).numRows !== 3) throw new Error('arrow ipc')
+const ac = new AbortController(); ac.abort()
+const aborted = await df.filter((c) => c.x.gt(1)).collect({ signal: ac.signal }).catch((e) => e)
+if (!(aborted instanceof ExecutionAbortedError)) throw new Error('abort: ' + aborted)
 console.log('esm ok', frame.shape, report.backendsUsed.join('+'))
 `)
 console.log(run(process.execPath, ['esm.mjs'], app).trim())

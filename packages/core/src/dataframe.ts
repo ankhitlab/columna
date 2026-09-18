@@ -1,6 +1,7 @@
 import {
   allocateData,
   encodeCategory,
+  fromArrowIpc,
   fromArrowLike,
   getRowField,
   getValue,
@@ -11,8 +12,10 @@ import {
   setValue,
   sliceTable,
   tableFromColumns,
+  toArrowIpc,
   toArrowLike,
   toRowObjects,
+  type ArrowIpcWriteOptions,
   type ArrowLike,
   type Column,
   type DType,
@@ -28,6 +31,7 @@ import {
   type ExecutionReport,
   type ExprNode,
   type JoinKind,
+  type ExecuteOptions,
   type MemoryPolicy,
   type PlanNode,
   type QuantileMethod,
@@ -48,6 +52,8 @@ import {
   readJsonRows,
   readKafkaBatch,
   readParquetRows,
+  loadBytes,
+  type IoLoadOptions,
   type IoSource,
   type KafkaConnection,
   type ReadCsvOptions,
@@ -616,7 +622,12 @@ export class LazyFrame<S extends Row = Row> {
     })
   }
 
-  async collect(opts?: { memory?: MemoryPolicy }): Promise<DataFrame<S>> {
+  /**
+   * Execute the plan. `{ signal }` aborts cooperatively (checked between operators; rejects with
+   * `ExecutionAbortedError`), `{ timeoutMs }` is a deadline checked at the same points, `{ memory }`
+   * overrides the memory policy for this run.
+   */
+  async collect(opts?: ExecuteOptions): Promise<DataFrame<S>> {
     const table = await this.runtime.execute(this.plan, opts)
     return new DataFrame<S>(table, this.runtime)
   }
@@ -626,7 +637,7 @@ export class LazyFrame<S extends Row = Row> {
    * GPU), why a node fell back to the CPU, and timings (for GPU nodes transfer vs. compute, plus the CPU
    * gather). Use it for benchmarks — "engine('wasm')" is a request, the report is the fact.
    */
-  async collectWithReport(opts?: { memory?: MemoryPolicy }): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+  async collectWithReport(opts?: ExecuteOptions): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
     const { table, report } = await this.runtime.executeWithReport(this.plan, opts)
     return { frame: new DataFrame<S>(table, this.runtime), report }
   }
@@ -651,9 +662,21 @@ export class LazyFrame<S extends Row = Row> {
     return df.toArray()
   }
 
+  /** @deprecated Returns columna's `ArrowLike` JSON, not Apache Arrow. Use `toArrowIpc()` for real Arrow bytes or `toArrowLike()`. */
   async toArrow(): Promise<ArrowLike> {
     const df = await this.collect()
-    return df.toArrow()
+    return df.toArrowLike()
+  }
+
+  async toArrowLike(): Promise<ArrowLike> {
+    const df = await this.collect()
+    return df.toArrowLike()
+  }
+
+  /** Collect and serialize as Apache Arrow IPC (see {@link DataFrame.toArrowIpc}). */
+  async toArrowIpc(options?: ArrowIpcWriteOptions): Promise<Uint8Array> {
+    const df = await this.collect()
+    return df.toArrowIpc(options)
   }
 }
 
@@ -1268,7 +1291,7 @@ export class DataFrame<S extends Row = Row> {
   explain(): string {
     return this.lazy().explain()
   }
-  collectWithReport(opts?: { memory?: MemoryPolicy }): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
+  collectWithReport(opts?: ExecuteOptions): Promise<{ frame: DataFrame<S>; report: ExecutionReport }> {
     return this.lazy().collectWithReport(opts)
   }
 
@@ -1289,8 +1312,34 @@ export class DataFrame<S extends Row = Row> {
     return toRowObjects(this.table) as S[]
   }
 
+  /** @deprecated Returns columna's `ArrowLike` JSON, not Apache Arrow. Use `toArrowIpc()` for real Arrow bytes or `toArrowLike()`. */
   toArrow(): ArrowLike {
     return toArrowLike(this.table)
+  }
+
+  /** columna's own JSON columnar form (schema + plain arrays). Not Apache Arrow — see `toArrowIpc()`. */
+  toArrowLike(): ArrowLike {
+    return toArrowLike(this.table)
+  }
+
+  /**
+   * Apache Arrow IPC bytes — the streaming format by default (`{ format: 'file' }` for Feather v2). Zero-copy
+   * consumers: `tableFromIPC()` of `apache-arrow`, DuckDB(-Wasm) `insertArrowFromIPCStream`, `pyarrow.ipc`,
+   * `polars.read_ipc_stream`, `pandas.read_feather` (file format). f64/f32/i32/u32/bool/utf8 map 1:1,
+   * category → Dictionary<Int32, Utf8>, datetime → Timestamp(ms). Round-trips with {@link DataFrame.fromArrowIpc}.
+   */
+  toArrowIpc(options?: ArrowIpcWriteOptions): Uint8Array {
+    return toArrowIpc(this.table, options)
+  }
+
+  /** Write Apache Arrow IPC to a Node path (`.arrow` / `.feather` with `{ format: 'file' }`) or return the bytes. */
+  async writeArrowIpc(path?: string, options?: ArrowIpcWriteOptions): Promise<Uint8Array> {
+    const bytes = toArrowIpc(this.table, options)
+    if (path) {
+      const fs = await import('node:fs/promises')
+      await fs.writeFile(path, bytes)
+    }
+    return bytes
   }
 
   getColumn<K extends keyof S & string>(name: K): Series<Cell<S[K]>> {
@@ -1510,8 +1559,28 @@ export class DataFrame<S extends Row = Row> {
     return DataFrame.fromRows(parseJsonToRows(data, options)) as DataFrame<S>
   }
 
+  /** @deprecated Takes columna's `ArrowLike` JSON, not Apache Arrow. Use `fromArrowIpc()` for real Arrow bytes or `fromArrowLike()`. */
   static fromArrow<S extends Row = Row>(arrow: ArrowLike): DataFrame<S> {
     return new DataFrame<any>(fromArrowLike(arrow))
+  }
+
+  static fromArrowLike<S extends Row = Row>(arrow: ArrowLike): DataFrame<S> {
+    return new DataFrame<any>(fromArrowLike(arrow))
+  }
+
+  /**
+   * Parse Apache Arrow IPC bytes (stream or file format) — e.g. `tableToIPC(table)` from `apache-arrow`, a
+   * DuckDB `arrow()` result, `pyarrow` / Polars output. Int8…Int64, UInt8…UInt64, Float16/32/64, Bool, Utf8,
+   * LargeUtf8, Timestamp (any unit), Date32/64, Null and dictionary-encoded strings are accepted; nested,
+   * decimal, binary and compressed batches throw with the column name. `S` is an assertion, not verified.
+   */
+  static fromArrowIpc<S extends Row = Row>(bytes: Uint8Array | ArrayBuffer): DataFrame<S> {
+    return new DataFrame<any>(fromArrowIpc(bytes))
+  }
+
+  /** Read Apache Arrow IPC (stream or file / Feather v2) from a path, URL or bytes under the IO policy. */
+  static async readArrowIpc<S extends Row = Row>(source: IoSource, options: IoLoadOptions = {}): Promise<DataFrame<S>> {
+    return new DataFrame<any>(fromArrowIpc(await loadBytes(source, options)))
   }
 
   /** Sync parse of an in-memory CSV string (pandas/polars-style options). */

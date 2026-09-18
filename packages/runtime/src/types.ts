@@ -305,6 +305,21 @@ export interface ExecContext {
   readonly requested: EngineKind
   readonly strict: boolean
   trace(event: ExecutionEvent): void
+  /** Cancellation / deadline guard (`collect({ signal, timeoutMs })`); the CPU engine yields between operators when set. */
+  readonly guard?: import('./cancel.js').ExecGuard
+}
+
+/** Options accepted by `collect()`, `collectWithReport()` and `Runtime.execute()`. */
+export interface ExecuteOptions {
+  memory?: import('./memory.js').MemoryPolicy
+  /**
+   * Abort cooperatively: checked before every operator (and the CPU engine yields to the event loop between
+   * operators so the signal can actually fire). Rejects with `ExecutionAbortedError`; a running kernel
+   * finishes first — granularity is one operator, not one row.
+   */
+  signal?: AbortSignal
+  /** Deadline in milliseconds, checked at the same points (works without any timer firing). */
+  timeoutMs?: number
 }
 
 export class EngineStrictError extends Error {

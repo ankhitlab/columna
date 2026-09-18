@@ -113,7 +113,8 @@ describe('invariants on seeded random frames', () => {
     }
   })
 
-  it('format round-trips preserve values and dtypes: CSV, JSON, parquet-like, Arrow-like', async () => {
+  it('format round-trips preserve values and dtypes: CSV, JSON, parquet-like, Arrow-like, Arrow IPC (ours and apache-arrow)', async () => {
+    const { tableFromIPC, tableToIPC } = await import('apache-arrow')
     for (const seed of seeds) {
       const rows = randomRows(seed, 1500)
       const df = DataFrame.fromRows(rows)
@@ -130,9 +131,16 @@ describe('invariants on seeded random frames', () => {
       expect(pq.toArray()).toEqual(rows)
       expect(pq.dtypes).toEqual(df.dtypes)
       // Arrow-like
-      const arrow = DataFrame.fromArrow(df.toArrow())
+      const arrow = DataFrame.fromArrowLike(df.toArrowLike())
       expect(arrow.toArray()).toEqual(rows)
       expect(arrow.dtypes).toEqual(df.dtypes)
+      // Apache Arrow IPC: our writer → our reader, and our writer → apache-arrow → its writer → our reader
+      const ipc = DataFrame.fromArrowIpc(df.toArrowIpc({ batchRows: 400 }))
+      expect(ipc.toArray()).toEqual(rows)
+      expect(ipc.dtypes).toEqual(df.dtypes)
+      const viaArrowJs = DataFrame.fromArrowIpc(tableToIPC(tableFromIPC(df.toArrowIpc()), 'file'))
+      expect(viaArrowJs.toArray()).toEqual(rows)
+      expect(viaArrowJs.dtypes).toEqual(df.dtypes)
     }
   })
 

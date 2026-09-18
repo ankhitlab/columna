@@ -4,7 +4,9 @@
 
 # columna
 
-Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary and no runtime dependencies in the core.
+Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary required. The engine (`@columna/arrow`, `@columna/runtime`) and the statistics (`@columna/advanced`) have no third-party runtime dependencies; `columna` / `@columna/core` add four IO packages (hyparquet ×3 for Parquet, SheetJS for Excel) that load lazily on first use — see [Packages](#packages). Speaks **Apache Arrow IPC** to DuckDB, Polars, pyarrow and `apache-arrow`.
+
+API reference: [docs/api](docs/api/index.html) (`pnpm docs:api`; published by CI on GitHub Pages). Coming from Arquero / Polars / pandas: [docs/migrating.md](docs/migrating.md).
 
 The DataFrame part competes with Arquero (same job; on 2M rows columna is 5–10× faster per operation and uses ~3× less memory), overlaps with DuckDB-Wasm (which is a real SQL engine and reads files faster) and is not a substitute for Polars or DuckDB native when a server can run one. What none of them have is the statistics layer: ~250 procedures — hypothesis tests, ANOVA, regression with full diagnostics, DOE, SPC, capability, reliability, time series, multivariate — each checked against scipy / numpy / NIST references. Measured comparison and an honest "when to use what": [docs/positioning.md](docs/positioning.md).
 
@@ -28,7 +30,8 @@ const out = await DataFrame.fromRows([
 
 - Fluent, lazy-friendly DataFrame API with expression DSL (`col`, `when`, string/datetime helpers)
 - Compute backends: CPU (typed kernels, optional native addon and worker parallelism in Node), with narrow WebGPU / WASM accelerations that report what they actually ran (see Engines)
-- IO for CSV / JSON / Excel / Parquet; optional SQL and Kafka batch reads via peer drivers
+- IO for CSV / JSON / Excel / Parquet; **Apache Arrow IPC** in and out (DuckDB, Polars, pyarrow, `apache-arrow`) with no dependency; optional SQL and Kafka batch reads via peer drivers
+- `collect({ signal, timeoutMs })`: cooperative cancellation and deadlines, checked between operators; the execution report says what ran where
 - `columna/advanced`: Minitab-level statistics (~250 procedures) with fixture, property and Monte-Carlo tests
 - Dual ESM / CommonJS builds with TypeScript declarations
 
@@ -38,8 +41,8 @@ const out = await DataFrame.fromRows([
 |---|---|
 | `columna` | Public umbrella entry |
 | `@columna/core` | Fluent API, Expr DSL, query plan |
-| `@columna/arrow` | Columnar TableView / schema |
-| `@columna/runtime` | Backend routing |
+| `@columna/arrow` | Columnar TableView / schema; Apache Arrow IPC reader / writer (no dependencies) |
+| `@columna/runtime` | Plan optimizer, backend routing, execution reports, cancellation, memory policy / spill (no third-party dependencies) |
 | `@columna/wasm` | Portable WASM kernels |
 | `@columna/webgpu` | WebGPU compute path |
 | `@columna/advanced` | **advanced**: Minitab-parity stats — tests, regression, SPC, DOE, time series, reliability, multivariate, predictive (`columna/advanced`) |
@@ -158,6 +161,39 @@ const pq = await DataFrame.readParquet('./events.parquet', { columns: ['ts', 'va
 ```
 
 Sync helpers for in-memory strings remain: `fromCSV`, `fromJSON`.
+
+### Apache Arrow IPC — the interop boundary
+
+`toArrowIpc()` / `fromArrowIpc()` speak the real Arrow IPC format (streaming by default, `{ format: 'file' }` for
+Feather v2) with **no dependency** — the FlatBuffers messages are written and read by columna itself. This is the
+bridge to everything Arrow-based:
+
+```ts
+// → DuckDB-Wasm (its own Arrow reader / writer, no apache-arrow in between)
+await conn.insertArrowFromIPCStream(df.toArrowIpc(), { name: 'orders' })
+const ipc = await conn.useUnsafe((db, id) => db.runQuery(id, 'SELECT country, sum(revenue) AS r FROM orders GROUP BY 1'))
+const result = DataFrame.fromArrowIpc(ipc)
+
+// ↔ apache-arrow
+import { tableFromIPC, tableToIPC } from 'apache-arrow'
+const table = tableFromIPC(df.toArrowIpc())
+const back = DataFrame.fromArrowIpc(tableToIPC(table))
+
+// files: pl.read_ipc_stream / pa.ipc.open_stream (.arrows), pl.read_ipc / pd.read_feather (.arrow / .feather)
+await df.writeArrowIpc('orders.arrows')
+await df.writeArrowIpc('orders.feather', { format: 'file' })
+const pq = await DataFrame.readArrowIpc({ url: 'https://data.example.com/orders.arrow' })
+```
+
+Type mapping: f64 / f32 / i32 / u32 / bool / utf8 map 1:1, `category` → `Dictionary<Int32, Utf8>`, `datetime` →
+`Timestamp(ms)`. Reading additionally accepts Int8…Int64 / UInt8…UInt64 (64-bit → f64, exact below 2⁵³), Float16,
+LargeUtf8, **Utf8View** (what Polars ≥ 1.0 and DuckDB emit), Timestamp in any unit, Date32 / Date64, Null and
+dictionary-encoded strings with any index width. Nested, decimal, binary and compressed (LZ4 / ZSTD) batches are
+refused with the column name — nothing is decoded wrongly. Verified in CI against three independent
+implementations: `apache-arrow` (JS), Polars (Rust, committed fixtures) and DuckDB-Wasm (C++, in headless Chromium).
+
+`toArrow()` / `fromArrow()` keep returning columna's own JSON `ArrowLike` for compatibility and are deprecated in
+favour of `toArrowLike()` — they were never Arrow.
 
 ### Saying what a source is, and fencing it in
 
@@ -572,6 +608,28 @@ planner, and by default an engine that cannot run a node hands it to the CPU wit
 | `wasm` | one kernel family: `col OP n AND col OP n` filters on i32×f64 / i32×i32 / f64×f64 columns, **≥ 5M rows**, and only when the Rust `pkg` is built and loaded | CPU |
 | `webgpu` | AND-filters over i32 / u32 / f32 columns and `col ARITH n` maps on f32 columns (exact; f64 / datetime need `gpuLossyF32`); rows ≥ 10 000 | CPU — including mask → indices and the row gather *after* every GPU filter |
 
+### Cancellation and deadlines
+
+`collect({ signal })` aborts cooperatively and `collect({ timeoutMs })` is a deadline. A plan is a chain of synchronous
+kernels; nothing interrupts one kernel half-way, so the guarantee is **per operator**: before every operator the
+runtime checks the signal and the clock, and — only when a guard is given — yields to the event loop between
+operators so an `AbortSignal` from a click handler or `AbortSignal.timeout()` can actually fire, and a UI stays
+responsive while a long plan runs. Fused fast paths (`project → filter`, `project → join`) stay fused; each unit
+runs through the same kernels as a plain `collect()` and gets its own line in the execution report.
+
+```ts
+const ac = new AbortController()
+cancelButton.onclick = () => ac.abort()
+try {
+  const out = await df.lazy().filter(...).groupBy('g').agg(...).collect({ signal: ac.signal, timeoutMs: 10_000 })
+} catch (e) {
+  if (e instanceof ExecutionAbortedError) console.log(e.reason, e.node, e.elapsedMs) // 'signal' | 'timeout', operator, ms
+}
+```
+
+An abort is never turned into an engine fallback, and the IO readers honour the same `signal` while streaming.
+A plain `collect()` without `signal` / `timeoutMs` runs exactly as before — no yields, no checks.
+
 Two tools make the difference visible:
 
 ```ts
@@ -629,15 +687,23 @@ GPU results are **bit-identical to the CPU**: the filter kernel compares `i32` /
 - **check** (Node 18 / 20 / 22): lint, build, typecheck (including the type-level schema tests), the vitest suite —
   fixtures against scipy / numpy / NIST, property and Monte-Carlo tests, the adversarial statistics set, the
   data-invariant suite (seeded random frames: partition identities, format round-trips CSV / JSON / parquet-like /
-  Arrow-like, requested-vs-actual engine equivalence), and CI-sized stress identities (`pnpm test:stress`: nulls,
-  joins, sortMulti, CSV round-trip, spill).
+  Arrow-like / Arrow IPC, requested-vs-actual engine equivalence), the Arrow IPC interop suite (against
+  `apache-arrow` and Polars-written fixtures), cooperative-cancellation equivalence, and CI-sized stress
+  identities (`pnpm test:stress`: nulls, joins, sortMulti, CSV round-trip, spill). Node 22 also runs the suite
+  under **v8 coverage**: the summary is printed on the job page and the HTML report is uploaded as the
+  `coverage` artifact (`pnpm test:coverage` locally; at the time of writing 82 % of lines / 80 % of branches /
+  87 % of functions over the published packages' `src/`).
+- **docs**: the API reference is generated with typedoc from the `columna` entry points and uploaded as the
+  `api-reference` artifact; the `pages` workflow publishes it to GitHub Pages on every push to `main`.
 - **consumer**: `pnpm pack` of every published package installed with npm into a clean project; ESM, CommonJS, the
   `columna/core` and `columna/advanced` subpaths and the TypeScript declarations are exercised (`pnpm test:consumer`).
 - **browser**: the built `columna` bundle is bundled by Vite with no aliases and run in headless Chromium with
   Playwright (`pnpm test:browser`): import side-effect freedom, CSV → filter → groupBy → join → CSV on 200k rows, typed
-  exactness, `columna/advanced`. The WebGPU checks (strict GPU filter ≡ CPU rows, f64 refusal with a reason) run only
-  when the browser exposes an adapter; headless CI runners do not, so they are exercised on a developer machine
-  (`SMOKE_HEADED=1 SMOKE_CHANNEL=chrome pnpm test:browser`) and in the shader-emulation tests under Node.
+  exactness, `columna/advanced`, and **Arrow IPC exchanged with DuckDB-Wasm** (200k rows in through
+  `insertArrowFromIPCStream`, a SQL group-by out through DuckDB's own IPC writer into `fromArrowIpc`, compared with
+  columna's groupBy). The WebGPU checks (strict GPU filter over exact i32 columns ≡ CPU rows, f64 refusal with a
+  reason) run whenever the browser exposes an adapter — GitHub's runners do through SwiftShader — and are skipped
+  with a note where none exists.
 - **windows**: the vitest suite on windows-latest.
 
 ## Contributing
