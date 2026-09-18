@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { estimateTableBytes, tableFromColumns } from '@columna/arrow'
 import { DataFrame, clearPersistCache } from '@columna/core'
 import { Runtime, clearMemoryPolicy, setMemoryPolicy } from '../src/index.js'
-import { resetExecMemoryStats } from '../src/memory.js'
+import {
+  getMemoryPolicy,
+  resetExecMemoryStats,
+  withMemoryPolicyAsync,
+} from '../src/memory.js'
 import { ensureSpillSupport, spillRead, spillUnlink, spillWrite } from '../src/spill.js'
 
 // direct spill calls (outside Runtime.execute) must initialise Node support first on Node < 20.16
@@ -159,5 +163,43 @@ describe('MemoryPolicy spill sort/unique/join', () => {
     expect([...got.entries()].sort((a, b) => a[0] - b[0])).toEqual(
       [...exp.entries()].sort((a, b) => a[0] - b[0]),
     )
+  })
+})
+
+describe('memory-policy isolation', () => {
+  it('keeps overlapping Node async scopes isolated', async () => {
+    let releaseA!: () => void
+    let releaseB!: () => void
+
+    const waitA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+
+    const waitB = new Promise<void>((resolve) => {
+      releaseB = resolve
+    })
+
+    let seenA = 0
+    let seenB = 0
+
+    const a = withMemoryPolicyAsync({ maxBytes: 100, spill: false }, async () => {
+      await waitA
+      seenA = getMemoryPolicy().maxBytes ?? 0
+    })
+
+    const b = withMemoryPolicyAsync({ maxBytes: 200, spill: true }, async () => {
+      await waitB
+      seenB = getMemoryPolicy().maxBytes ?? 0
+    })
+
+    releaseB()
+    await Promise.resolve()
+
+    releaseA()
+
+    await Promise.all([a, b])
+
+    expect(seenA).toBe(100)
+    expect(seenB).toBe(200)
   })
 })
