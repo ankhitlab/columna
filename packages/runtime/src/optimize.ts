@@ -286,41 +286,27 @@ function filterIntoJoin(plan: PlanNode): PlanNode {
   // Outer joins invent nulls on the non-preserved side; filters on that side must stay post-join.
   const canPushLeft = join.how === 'inner' || join.how === 'left'
   const canPushRight = join.how === 'inner' || join.how === 'right'
-  const leftCols = planOutputColumns(join.left) ?? leafColumnNames(join.left)
-  const rightCols = planOutputColumns(join.right) ?? leafColumnNames(join.right)
-  const rSuffix = join.rSuffix ?? '_right'
-  const lSuffix = join.lSuffix ?? ''
-  const keyNames = new Set([...join.leftOn, ...join.rightOn])
+  const leftCols = planOutputColumns(join.left)
+  const rightCols = planOutputColumns(join.right)
+
+  // Unknown provenance => no pushdown.
+  // leafColumnNames() is not safe here because rename/project may have changed names.
+  if (!leftCols || !rightCols) return plan
 
   const resolveSide = (name: string): 'left' | 'right' | 'both' | 'unknown' => {
-    if (keyNames.has(name) && leftCols.has(name) && rightCols.has(name)) return 'both'
-    if (lSuffix && name.endsWith(lSuffix)) {
-      const base = name.slice(0, -lSuffix.length)
-      if (base && leftCols.has(base)) return 'left'
-    }
-    if (rSuffix && name.endsWith(rSuffix)) {
-      const base = name.slice(0, -rSuffix.length)
-      if (base && rightCols.has(base)) return 'right'
-    }
     const onLeft = leftCols.has(name)
     const onRight = rightCols.has(name)
-    if (onLeft && !onRight) return 'left'
-    if (onRight && !onLeft) return 'right'
+
     if (onLeft && onRight) return 'both'
+    if (onLeft) return 'left'
+    if (onRight) return 'right'
+
+    // This includes synthetic `foo_right` / `foo_left` output names.
+    // Keep those predicates above the join until explicit provenance metadata exists.
     return 'unknown'
   }
 
-  const toChildName = (name: string, side: 'left' | 'right'): string => {
-    if (side === 'left' && lSuffix && name.endsWith(lSuffix)) {
-      const base = name.slice(0, -lSuffix.length)
-      if (base && leftCols.has(base)) return base
-    }
-    if (side === 'right' && rSuffix && name.endsWith(rSuffix)) {
-      const base = name.slice(0, -rSuffix.length)
-      if (base && rightCols.has(base)) return base
-    }
-    return name
-  }
+  const toChildName = (name: string): string => name
 
   const leftParts: ExprNode[] = []
   const rightParts: ExprNode[] = []
@@ -338,12 +324,20 @@ function filterIntoJoin(plan: PlanNode): PlanNode {
       continue
     }
     if (sides.has('left')) {
-      if (canPushLeft) leftParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'left')))
-      else topParts.push(conj)
+      if (canPushLeft) {
+        leftParts.push(renameColsInExpr(conj, toChildName))
+      } else {
+        topParts.push(conj)
+      }
     } else if (sides.has('right')) {
-      if (canPushRight) rightParts.push(renameColsInExpr(conj, (n) => toChildName(n, 'right')))
-      else topParts.push(conj)
-    } else topParts.push(conj)
+      if (canPushRight) {
+        rightParts.push(renameColsInExpr(conj, toChildName))
+      } else {
+        topParts.push(conj)
+      }
+    } else {
+      topParts.push(conj)
+    }
   }
 
   if (leftParts.length === 0 && rightParts.length === 0) return plan
@@ -472,6 +466,33 @@ function filterUnderRename(plan: PlanNode): PlanNode {
   }
 }
 
+function composeRenameMappings(
+  inner: Record<string, string>,
+  outer: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  const innerTargets = new Set(Object.values(inner))
+
+  // Original column -> name after inner -> name after outer.
+  for (const [source, intermediate] of Object.entries(inner)) {
+    const target = Object.hasOwn(outer, intermediate)
+      ? outer[intermediate]!
+      : intermediate
+
+    if (target !== source) result[source] = target
+  }
+
+  // Outer rename of a column untouched by the inner rename.
+  for (const [source, target] of Object.entries(outer)) {
+    if (Object.hasOwn(inner, source)) continue
+    if (innerTargets.has(source)) continue
+
+    if (target !== source) result[source] = target
+  }
+
+  return result
+}
+
 /**
  * R7: fold adjacent project / drop / rename into fewer nodes.
  */
@@ -509,18 +530,11 @@ function foldProjectDrop(plan: PlanNode): PlanNode {
 
   // Compose renames: rename(rename(x))
   if (plan.type === 'rename' && plan.input.type === 'rename') {
-    const composed: Record<string, string> = { ...plan.input.mapping }
-    for (const [from, to] of Object.entries(plan.mapping)) {
-      let found = false
-      for (const [innerFrom, innerTo] of Object.entries(composed)) {
-        if (innerTo === from) {
-          composed[innerFrom] = to
-          found = true
-        }
-      }
-      if (!found) composed[from] = to
+    return {
+      type: 'rename',
+      mapping: composeRenameMappings(plan.input.mapping, plan.mapping),
+      input: plan.input.input,
     }
-    return { type: 'rename', mapping: composed, input: plan.input.input }
   }
 
   return plan
@@ -656,12 +670,9 @@ function collectInnerJoinGraph(plan: PlanNode): JoinGraph | null {
 function findLeafWithColumn(leaves: PlanNode[], ids: Set<number>, col: string): number | null {
   for (const id of ids) {
     const cols = planOutputColumns(leaves[id]!)
-    if (cols && cols.has(col)) return id
+    if (cols?.has(col)) return id
   }
-  // Soft fallback: accept if leafColumnNames has it
-  for (const id of ids) {
-    if (leafColumnNames(leaves[id]!).has(col)) return id
-  }
+
   return null
 }
 
@@ -833,20 +844,35 @@ function reorderInnerJoinGraph(plan: PlanNode): PlanNode {
 
   while (used.size < n) {
     let bestLeaf = -1
-    let bestEdge: JoinEdge | null = null
+    let bestEdges: JoinEdge[] | null = null
     let bestRows = Infinity
     for (let i = 0; i < n; i++) {
       if (used.has(i)) continue
-      const e = findEdgeToSet(edges, i, used)
-      if (!e) continue
+
+      const connectingEdges = findEdgesToSet(edges, i, used)
+      if (connectingEdges.length === 0) continue
+
       const rows = estimatePlanRows(leaves[i]!)
+
       if (rows < bestRows || (rows === bestRows && i < bestLeaf)) {
         bestRows = rows
         bestLeaf = i
-        bestEdge = e
+        bestEdges = connectingEdges
       }
     }
-    if (bestLeaf < 0 || !bestEdge) return reorderSameKeyChainFallback(plan)
+
+    if (bestLeaf < 0 || !bestEdges) {
+      return reorderSameKeyChainFallback(plan)
+    }
+
+    // A single physical join node currently represents one leaf-to-subtree
+    // equi relation. Multiple independent edges would require preserving
+    // all predicates explicitly. Until that representation exists, do not reorder.
+    if (bestEdges.length !== 1) {
+      return plan
+    }
+
+    const bestEdge = bestEdges[0]!
 
     // Attach new leaf as build (right); keys: used-side on left, new leaf on right
     const newIsRight = bestEdge.rightLeaf === bestLeaf
@@ -884,12 +910,25 @@ function leavesHaveAmbiguousCollisions(leaves: PlanNode[], edges: JoinEdge[]): b
   return false
 }
 
-function findEdgeToSet(edges: JoinEdge[], leaf: number, used: Set<number>): JoinEdge | null {
-  for (const e of edges) {
-    if (e.leftLeaf === leaf && used.has(e.rightLeaf)) return e
-    if (e.rightLeaf === leaf && used.has(e.leftLeaf)) return e
+function findEdgesToSet(
+  edges: JoinEdge[],
+  leaf: number,
+  used: Set<number>,
+): JoinEdge[] {
+  const matches: JoinEdge[] = []
+
+  for (const edge of edges) {
+    if (edge.leftLeaf === leaf && used.has(edge.rightLeaf)) {
+      matches.push(edge)
+      continue
+    }
+
+    if (edge.rightLeaf === leaf && used.has(edge.leftLeaf)) {
+      matches.push(edge)
+    }
   }
-  return null
+
+  return matches
 }
 
 /** Legacy same-key chain when multi-key provenance fails. */

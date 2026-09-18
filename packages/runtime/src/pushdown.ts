@@ -1,12 +1,20 @@
 import type { ExprNode, PlanNode } from './types.js'
 import { collectLeafTables } from './types.js'
 
-/** Collect column names referenced by an expression (best-effort). */
+/** Collect every column referenced by an expression.
+ *
+ * IMPORTANT: this function is used for correctness-sensitive optimizer decisions.
+ * A newly added ExprNode variant must be handled explicitly.
+ */
 export function exprColumnRefs(expr: ExprNode, out = new Set<string>()): Set<string> {
   switch (expr.type) {
     case 'col':
       out.add(expr.name)
-      break
+      return out
+
+    case 'lit':
+      return out
+
     case 'alias':
     case 'cast':
     case 'fillNull':
@@ -15,54 +23,74 @@ export function exprColumnRefs(expr: ExprNode, out = new Set<string>()): Set<str
     case 'dt':
     case 'clip':
     case 'mapElements':
-      exprColumnRefs((expr as { expr: ExprNode }).expr, out)
-      break
+    case 'isIn':
+    case 'rowOffset':
+      return exprColumnRefs(expr.expr, out)
+
     case 'binary':
       exprColumnRefs(expr.left, out)
       exprColumnRefs(expr.right, out)
-      break
+      return out
+
     case 'when':
-      for (const w of expr.branches) {
-        exprColumnRefs(w.when, out)
-        exprColumnRefs(w.then, out)
+      for (const branch of expr.branches) {
+        exprColumnRefs(branch.when, out)
+        exprColumnRefs(branch.then, out)
       }
       exprColumnRefs(expr.otherwise, out)
-      break
-    case 'isIn':
-      exprColumnRefs(expr.expr, out)
-      break
+      return out
+
     case 'isBetween':
       exprColumnRefs(expr.expr, out)
-      break
+      exprColumnRefs(expr.low, out)
+      exprColumnRefs(expr.high, out)
+      return out
+
     case 'str':
       exprColumnRefs(expr.expr, out)
-      break
-    case 'rowOffset':
-      exprColumnRefs(expr.expr, out)
-      break
+      if (expr.other) exprColumnRefs(expr.other, out)
+      return out
+
     case 'over':
       exprColumnRefs(expr.expr, out)
-      for (const p of expr.partitionBy ?? []) out.add(p)
-      for (const o of expr.orderBy ?? []) out.add(o)
-      break
-    default:
-      break
+      for (const name of expr.partitionBy ?? []) out.add(name)
+      for (const name of expr.orderBy ?? []) out.add(name)
+      return out
+
+    default: {
+      const exhaustive: never = expr
+      return exhaustive
+    }
   }
-  return out
 }
 
+/**
+ * Pure projection that preserves column identity and names.
+ *
+ * Aliases intentionally return null. Supporting aliases safely requires
+ * source→output provenance, not just string column names.
+ */
 function projectIsColumnSubset(columns: Array<string | ExprNode>): string[] | null {
   const names: string[] = []
-  for (const c of columns) {
-    if (typeof c === 'string') names.push(c)
-    else if (c.type === 'col') names.push(c.name)
-    else if (c.type === 'alias' && c.expr.type === 'col') names.push(c.expr.name)
-    else return null
+
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      names.push(column)
+      continue
+    }
+
+    if (column.type === 'col') {
+      names.push(column.name)
+      continue
+    }
+
+    return null
   }
+
   return names
 }
 
-/** Simple column-subset / alias-of-col project → output names (or null if complex). */
+/** Simple column-subset project → output names (or null if complex / aliased). */
 export function projectColumnSubset(columns: Array<string | ExprNode>): string[] | null {
   return projectIsColumnSubset(columns)
 }

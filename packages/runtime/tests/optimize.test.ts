@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DataFrame, col } from '@columna/core'
 import { optimizePlan, estimatePlanRows, joinOrderChanged } from '../src/optimize.js'
-import { pushdownProjections } from '../src/pushdown.js'
+import { exprColumnRefs, pushdownProjections } from '../src/pushdown.js'
 import type { ExprNode, PlanNode } from '../src/types.js'
 
 function scan(rows: Record<string, unknown>[]): PlanNode {
@@ -571,5 +571,76 @@ describe('optimizePlan identity via collect', () => {
     const { report } = await left.join(right, { on: 'id' }).collectWithReport()
     const reorder = report.events.find((e) => e.kernel === 'optimized:joinReorder')
     expect(reorder).toBeDefined()
+  })
+})
+
+describe('optimizer correctness regressions', () => {
+  it('does not fold an alias projection as a plain column subset', async () => {
+    const out = await DataFrame.fromRows([{ a: 1, b: 2 }])
+      .select(col('a').alias('b'), col('b').alias('a'))
+      .select('a')
+      .collect()
+
+    expect(out.toArray()).toEqual([{ a: 2 }])
+  })
+
+  it('two simultaneous rename swaps cancel each other', async () => {
+    const out = await DataFrame.fromRows([{ a: 1, b: 2 }])
+      .rename({ a: 'b', b: 'a' })
+      .rename({ a: 'b', b: 'a' })
+      .collect()
+
+    expect(out.toArray()).toEqual([{ a: 1, b: 2 }])
+  })
+
+  it('isBetween dependencies include low and high expressions', () => {
+    const expr = col('x').isBetween(col('lo'), col('hi')).node
+
+    expect([...exprColumnRefs(expr)].sort()).toEqual(['hi', 'lo', 'x'])
+  })
+
+  it('str.concat dependency includes the other expression', () => {
+    const expr = {
+      type: 'str',
+      op: 'concat',
+      expr: { type: 'col', name: 'a' },
+      other: { type: 'col', name: 'b' },
+    } as const
+
+    expect([...exprColumnRefs(expr)].sort()).toEqual(['a', 'b'])
+  })
+
+  it('select after isBetween keeps bound columns until predicate execution', async () => {
+    const out = await DataFrame.fromRows([
+      { x: 5, lo: 0, hi: 10 },
+      { x: 20, lo: 0, hi: 10 },
+    ])
+      .filter(col('x').isBetween(col('lo'), col('hi')))
+      .select('x')
+      .collect()
+
+    expect(out.toArray()).toEqual([{ x: 5 }])
+  })
+
+  it('does not infer join side from a real _right suffix', async () => {
+    const left = DataFrame.fromRows([{ id: 1, score_right: 0 }])
+    const right = DataFrame.fromRows([{ id: 1, score: 10 }])
+
+    const out = await left.join(right, { on: 'id' }).filter(col('score_right').gt(0)).collect()
+
+    expect(out.toArray()).toEqual([])
+  })
+
+  it('does not drop a second edge to an already joined subtree', async () => {
+    const a = DataFrame.fromRows([{ aid: 1, a: 10 }])
+    const b = DataFrame.fromRows([{ bid: 1, b: 20 }])
+    const c = DataFrame.fromRows([{ ca: 10, cb: 999 }])
+
+    const out = await a
+      .join(b, { leftOn: 'aid', rightOn: 'bid' })
+      .join(c, { leftOn: ['a', 'b'], rightOn: ['ca', 'cb'] })
+      .collect()
+
+    expect(out.toArray()).toEqual([])
   })
 })
