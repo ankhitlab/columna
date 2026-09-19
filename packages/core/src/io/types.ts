@@ -58,6 +58,12 @@ export type IoPolicy = {
 
 /** Options shared by every reader that resolves an `IoSource`. */
 export type IoLoadOptions = IoPolicy & {
+  /**
+   * Additional policy floors — a `Session`'s policy, for instance. Every floor is enforced like the
+   * process-wide one (each must pass; byte caps and timeouts take the minimum), and per-call fields
+   * cannot widen any of them.
+   */
+  floors?: IoPolicy[]
   /** Interpret a bare string as content / path / URL instead of guessing (default `'auto'`). */
   mode?: IoSourceMode
   /** Treat a string source as raw content, never as a path (alias of `mode: 'text'`). */

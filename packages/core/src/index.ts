@@ -23,6 +23,7 @@ export type {
   SqlParams,
 } from './dataframe.js'
 export { dt, daysBetween } from './datetime.js'
+export { Session, createSession, type SessionOptions } from './session.js'
 export { openSqlClient, setIoPolicy, getIoPolicy, io } from './io/index.js'
 export type { IoPolicy, IoLoadOptions, IoSourceMode } from './io/types.js'
 export type { CsvWriteOptions } from './io/write.js'
@@ -38,4 +39,9 @@ export {
   clearMemoryPolicy,
   estimateTableBytes,
   clearPersistCache,
+  PersistCache,
+  Runtime,
+  getDefaultRuntime,
+  setDefaultRuntime,
 } from '@columna/runtime'
+export type { PersistCacheOptions, RuntimeOptions } from '@columna/runtime'

@@ -31,10 +31,14 @@ export type {
 export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
 export { toArrowIpc, fromArrowIpc } from '@columna/arrow'
 export type { AggKind, CorrMethod, EngineKind, ExecuteOptions, ExecutionEvent, ExecutionReport, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
+export { Session, createSession, type SessionOptions } from '@columna/core'
 export {
   EngineStrictError,
   ExecutionAbortedError,
   formatExecutionReport,
+  PersistCache,
+  type PersistCacheOptions,
+  type RuntimeOptions,
   Runtime,
   getDefaultRuntime,
   setDefaultRuntime,

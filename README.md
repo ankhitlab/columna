@@ -226,8 +226,37 @@ setIoPolicy({ allowedDirs: ['/srv/data'], allowedHosts: ['data.example.com'], ma
 
 `allowedDirs` compares real paths (symlinks cannot escape); `file://` URLs are filesystem reads under the same rule;
 every redirect hop is checked against `allowedHosts` / `denyPrivateHosts`; URLs with embedded credentials and
-non-http(s) protocols are refused. `denyPrivateHosts` is a name check, not DNS — for DNS-rebinding protection pass
-your own `fetch` (it receives `{ redirect: 'manual', signal }`).
+non-http(s) protocols are refused. `denyPrivateHosts` checks the name and, on Node, resolves it (every address,
+every hop) — but does not pin the connection; for the DNS-rebinding TOCTOU pass a pinning `fetch` (recipe in
+[SECURITY.md](SECURITY.md)).
+
+### Sessions — per-tenant state instead of process-wide state
+
+Three things are process-wide by default: the runtime (`getDefaultRuntime()`: engine, strictness, memory policy),
+the `persist()` cache and the IO policy floor (`setIoPolicy()`). A server that serves several tenants, or a test
+suite, wants them per context. `createSession()` bundles all three; nothing a session does leaks into another
+session or into the defaults:
+
+```ts
+import { createSession, col } from 'columna'
+
+const tenant = createSession({
+  io: { allowedHosts: ['data.acme.example'], denyPrivateHosts: true, maxBytes: 200e6, timeoutMs: 30_000 },
+  runtime: { engine: 'cpu', strict: true, memory: { maxBytes: 512 * 1024 * 1024 } },
+  persist: { maxBytes: 128 * 1024 * 1024 }, // its own LRU; `false` shares the process cache
+})
+
+const orders = await tenant.readCsv({ url: 'https://data.acme.example/orders.csv' }) // session floor + process floor
+const top = await orders.lazy().groupBy('country').agg({ r: col('revenue').sum() }).persist().collect()
+const again = await tenant.bind(existingFrame).lazy().filter(...).collect() // move a frame onto the session
+tenant.close() // drops the session's cache
+```
+
+The session's IO policy is a floor on top of the process one: per-call options can narrow it, never widen it
+(`loadBytes(src, tenant.ioOptions(opts))` for custom readers). Frames remember their runtime — `df.withRuntime(rt)` /
+`df.getRuntime()` — and `new Runtime({ memory, persist })` no longer touches the process defaults. Backends
+registered on the default runtime (WASM, WebGPU after `init()`) are visible to sessions; `backends: []` makes a
+CPU-only one.
 
 ## Databases
 

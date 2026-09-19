@@ -4,13 +4,12 @@ import {
   getExecMemoryStats,
   getMemoryPolicy,
   resetExecMemoryStats,
-  setMemoryPolicy,
   withMemoryPolicyAsync,
   type MemoryPolicy,
 } from './memory.js'
 import { ensureSpillSupport } from './spill.js'
 import { ExecutionAbortedError, checkGuard, makeGuard } from './cancel.js'
-import { lookupPersistCache, maybeStorePersist, type PersistLookup } from './persist.js'
+import { PersistCache, defaultPersistCache } from './persist.js'
 import { optimizePlan, joinOrderChanged } from './optimize.js'
 import {
   DEFAULT_WASM_MIN_ROWS,
@@ -30,7 +29,9 @@ import {
 
 export class Runtime {
   private backends = new Map<EngineKind, Backend>()
-  private options: Required<Omit<RuntimeOptions, 'memory'>> & { memory?: MemoryPolicy }
+  private options: Required<Omit<RuntimeOptions, 'memory' | 'persist'>> & { memory?: MemoryPolicy }
+  /** This runtime's `persist()` cache: the process default unless the constructor was given its own. */
+  readonly persist: PersistCache
 
   constructor(options: RuntimeOptions = {}) {
     this.options = {
@@ -41,21 +42,32 @@ export class Runtime {
       strict: options.strict ?? false,
       memory: options.memory,
     }
+    this.persist = options.persist ?? defaultPersistCache
     this.register(new CpuBackend())
-    if (options.memory) setMemoryPolicy(options.memory)
+    // `memory` is this runtime's policy, applied per execution; it never touches the process default.
+  }
+
+  /** The memory policy this runtime applies to every execution (call-site `collect({ memory })` overrides it). */
+  get memoryPolicy(): MemoryPolicy | undefined {
+    return this.options.memory
   }
 
   register(backend: Backend): void {
     this.backends.set(backend.name, backend)
   }
 
+  /** Registered backends (CPU first). Backends are shareable: `withEngine` forks and sessions reuse them. */
+  listBackends(): Backend[] {
+    return [...this.backends.values()]
+  }
+
   setEngine(engine: EngineKind): void {
     this.options.engine = engine
   }
 
+  /** Replace this runtime's memory policy (instance only; `setMemoryPolicy()` from the package sets the process default). */
   setMemoryPolicy(policy: MemoryPolicy): void {
     this.options.memory = policy
-    setMemoryPolicy(policy)
   }
 
   /** Immutable-ish fork with a forced engine (does not mutate this instance). */
@@ -64,6 +76,7 @@ export class Runtime {
       ...this.options,
       engine,
       strict: options.strict ?? this.options.strict,
+      persist: this.persist,
     })
     for (const backend of this.backends.values()) {
       if (backend.name !== 'cpu') rt.register(backend)
@@ -125,7 +138,7 @@ export class Runtime {
       const rawPlan = plan
       plan = optimizePlan(plan)
       checkGuard(guard, 'optimize')
-      const cached = lookupPersistCache(plan)
+      const cached = this.persist.lookup(plan)
       if (cached) {
         const mem = getExecMemoryStats()
         return {
@@ -171,7 +184,7 @@ export class Runtime {
     const finish = (table: TableView, dispatched: EngineKind): { table: TableView; report: ExecutionReport } => {
       const backendsUsed = [...new Set(events.map((e) => e.backend))]
       const mem = getExecMemoryStats()
-      maybeStorePersist(plan, table)
+      this.persist.maybeStore(plan, table)
       const report: ExecutionReport = {
         requested,
         dispatched,
@@ -250,6 +263,9 @@ export {
 } from './memory_api.js'
 export type { MemoryPolicy } from './memory.js'
 export {
+  PersistCache,
+  defaultPersistCache,
+  type PersistCacheOptions,
   hashPlan,
   storePersistCache,
   dropPersistCache,

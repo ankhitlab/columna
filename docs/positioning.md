@@ -84,6 +84,9 @@ are in the linked report.
   Arrow types and LZ4 / ZSTD-compressed batches are refused, not approximated.
 - **Cancellation is per operator, not per row.** A running kernel finishes before `collect({ signal })` rejects.
 - **No SQL.** Everything is method chains and expressions.
+- **Process-wide defaults are opt-out, not absent.** `getDefaultRuntime()`, the default `persist()` cache and
+  `setIoPolicy()` exist for scripts and notebooks; a server isolates tenants with `createSession()` (own runtime,
+  cache and IO floor). The default runtime's accelerator registration (`init()`) is still process-level.
 - **Scale ceiling is process memory by default.** On Node you can set a soft budget (`MemoryPolicy.maxBytes`) so sort / unique / join / groupBy spill intermediates to disk instead of growing without bound; the browser has no spill path.
 
 ## Choosing

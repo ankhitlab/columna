@@ -37,8 +37,6 @@ import {
   type QuantileMethod,
   type RankMethod,
   type Runtime,
-  markPlanPersist,
-  unmarkPlanPersist,
 } from '@columna/runtime'
 import { Expr, col, lit, when, type AnyExpr, type ColRefs } from './expr.js'
 import {
@@ -159,6 +157,16 @@ export class LazyFrame<S extends Row = Row> {
    */
   engine(kind: EngineKind, options: { strict?: boolean } = {}): LazyFrame<S> {
     return new LazyFrame<S>(this.plan, this.runtime.withEngine(kind, options))
+  }
+
+  /** The same plan on another runtime (its engine, memory policy and `persist()` cache) — see `Session`. */
+  withRuntime(runtime: Runtime): LazyFrame<S> {
+    return new LazyFrame<S>(this.plan, runtime)
+  }
+
+  /** The runtime this plan will execute on. */
+  getRuntime(): Runtime {
+    return this.runtime
   }
 
   /** The plan and the backend it is dispatched to. What ran is only known after execution: see `collectWithReport()`. */
@@ -647,13 +655,13 @@ export class LazyFrame<S extends Row = Row> {
    * collects of an identical plan return the cached table (`report.cacheHit`).
    */
   persist(): this {
-    markPlanPersist(this.plan)
+    this.runtime.persist.mark(this.plan)
     return this
   }
 
   /** Drop a previously persisted plan from the LRU cache. */
   unpersist(): this {
-    unmarkPlanPersist(this.plan)
+    this.runtime.persist.unmark(this.plan)
     return this
   }
 
@@ -1005,6 +1013,16 @@ export class DataFrame<S extends Row = Row> {
 
   lazy(): LazyFrame<S> {
     return new LazyFrame<S>({ type: 'scan', table: this.table }, this.runtime)
+  }
+
+  /** The same table bound to another runtime (its engine, memory policy and `persist()` cache) — see `Session`. */
+  withRuntime(runtime: Runtime): DataFrame<S> {
+    return new DataFrame<S>(this.table, runtime)
+  }
+
+  /** The runtime plans derived from this frame execute on. */
+  getRuntime(): Runtime {
+    return this.runtime
   }
 
   select<K extends keyof S & string>(...columns: K[]): LazyFrame<Simplify<Pick<S, K>>>

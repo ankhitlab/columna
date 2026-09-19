@@ -26,6 +26,11 @@ export function getIoPolicy(): IoPolicy {
   return { ...globalPolicy }
 }
 
+/** Policy layers, outermost first: process floor, session floors, then the call's own fields. */
+function layers(opts: IoLoadOptions): IoPolicy[] {
+  return [globalPolicy, ...(opts.floors ?? []), opts]
+}
+
 // ---- classification ------------------------------------------------------------------------------
 
 function isUrlString(s: string): boolean {
@@ -196,16 +201,19 @@ async function checkPathPolicy(path: string, policy: IoPolicy): Promise<void> {
   if (!ok.some(Boolean)) throw new Error(`IO policy: path "${path}" is outside allowedDirs`)
 }
 
-function effectiveMaxBytes(a: IoPolicy, b: IoPolicy): number | undefined {
-  const xs = [a.maxBytes, b.maxBytes].filter((v): v is number => typeof v === 'number' && v >= 0)
+function effectiveMaxBytes(opts: IoLoadOptions): number | undefined {
+  const xs = layers(opts)
+    .map((p) => p.maxBytes)
+    .filter((v): v is number => typeof v === 'number' && v >= 0)
   return xs.length ? Math.min(...xs) : undefined
 }
 
 function combinedSignal(opts: IoLoadOptions): AbortSignal | undefined {
   const signals: AbortSignal[] = []
-  if (opts.signal) signals.push(opts.signal)
-  if (globalPolicy.signal) signals.push(globalPolicy.signal)
-  const timeouts = [opts.timeoutMs, globalPolicy.timeoutMs].filter((v): v is number => typeof v === 'number' && v > 0)
+  for (const p of layers(opts)) if (p.signal) signals.push(p.signal)
+  const timeouts = layers(opts)
+    .map((p) => p.timeoutMs)
+    .filter((v): v is number => typeof v === 'number' && v > 0)
   if (timeouts.length) signals.push(AbortSignal.timeout(Math.min(...timeouts)))
   if (signals.length === 0) return undefined
   if (signals.length === 1) return signals[0]
@@ -220,9 +228,8 @@ function combinedSignal(opts: IoLoadOptions): AbortSignal | undefined {
 
 /** Path policy (allowedDirs from both the process policy and the call) plus the maxBytes stat check. */
 export async function checkPathAllowed(path: string, opts: IoLoadOptions): Promise<void> {
-  await checkPathPolicy(path, globalPolicy)
-  await checkPathPolicy(path, opts)
-  const maxBytes = effectiveMaxBytes(globalPolicy, opts)
+  for (const p of layers(opts)) await checkPathPolicy(path, p)
+  const maxBytes = effectiveMaxBytes(opts)
   if (maxBytes !== undefined) {
     const fs = await import('node:fs/promises')
     const st = await fs.stat(path)
@@ -233,9 +240,8 @@ export async function checkPathAllowed(path: string, opts: IoLoadOptions): Promi
 // ---- loading -------------------------------------------------------------------------------------
 
 async function readNodeFile(path: string, opts: IoLoadOptions): Promise<Uint8Array> {
-  await checkPathPolicy(path, globalPolicy)
-  await checkPathPolicy(path, opts)
-  const maxBytes = effectiveMaxBytes(globalPolicy, opts)
+  for (const p of layers(opts)) await checkPathPolicy(path, p)
+  const maxBytes = effectiveMaxBytes(opts)
   let fs: typeof import('node:fs/promises')
   try {
     fs = await import('node:fs/promises')
@@ -267,11 +273,12 @@ async function defaultResolveHost(hostname: string): Promise<string[] | null> {
  * were already judged by the name check. Runs for every hop of a redirect.
  */
 async function checkResolvedAddresses(url: URL, opts: IoLoadOptions): Promise<void> {
-  if (!(globalPolicy.denyPrivateHosts || opts.denyPrivateHosts)) return
+  const all = layers(opts)
+  if (!all.some((p) => p.denyPrivateHosts)) return
   const host = stripBrackets(url.hostname)
   if (ipv4Octets(host) || host.includes(':')) return // literal address: already checked
-  // the process-wide resolver is a floor: a per-call resolver cannot replace it
-  const resolve = globalPolicy.resolveHost ?? opts.resolveHost ?? defaultResolveHost
+  // the outermost resolver wins: a per-call resolver cannot replace the process-wide or a session's
+  const resolve = all.find((p) => p.resolveHost)?.resolveHost ?? defaultResolveHost
   let addresses: string[] | null
   try {
     addresses = await resolve(host)
@@ -285,15 +292,16 @@ async function checkResolvedAddresses(url: URL, opts: IoLoadOptions): Promise<vo
 }
 
 async function fetchBytes(href: string, opts: IoLoadOptions): Promise<Uint8Array> {
-  const fetchImpl = opts.fetch ?? globalPolicy.fetch ?? fetch
-  const maxRedirects = opts.maxRedirects ?? globalPolicy.maxRedirects ?? 5
-  const maxBytes = effectiveMaxBytes(globalPolicy, opts)
+  const all = layers(opts)
+  const fetchImpl = [...all].reverse().find((p) => p.fetch)?.fetch ?? fetch
+  const redirectCaps = all.map((p) => p.maxRedirects).filter((v): v is number => typeof v === 'number' && v >= 0)
+  const maxRedirects = redirectCaps.length ? Math.min(...redirectCaps) : 5
+  const maxBytes = effectiveMaxBytes(opts)
   const signal = combinedSignal(opts)
   let url = new URL(href)
-  // Redirects are followed by hand so that every hop — not only the first URL — passes the policy.
+  // Redirects are followed by hand so that every hop — not only the first URL — passes every policy layer.
   for (let hop = 0; ; hop++) {
-    checkUrlPolicy(url, globalPolicy)
-    checkUrlPolicy(url, opts)
+    for (const p of all) checkUrlPolicy(url, p)
     await checkResolvedAddresses(url, opts)
     const res = await fetchImpl(url.href, { redirect: 'manual', signal })
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
@@ -344,7 +352,7 @@ async function readBodyCapped(res: Response, maxBytes: number | undefined, href:
  */
 export async function loadBytes(source: IoSource, opts: IoLoadOptions = {}): Promise<Uint8Array> {
   const r = resolveSource(source, opts)
-  const maxBytes = effectiveMaxBytes(globalPolicy, opts)
+  const maxBytes = effectiveMaxBytes(opts)
   switch (r.kind) {
     case 'bytes':
       if (maxBytes !== undefined && r.bytes.byteLength > maxBytes) throw new Error(`IO policy: input is ${r.bytes.byteLength} bytes, above maxBytes = ${maxBytes}`)
@@ -373,7 +381,7 @@ export async function loadBytes(source: IoSource, opts: IoLoadOptions = {}): Pro
 export async function loadText(source: IoSource, opts: IoLoadOptions = {}): Promise<string> {
   const r = resolveSource(source, opts)
   if (r.kind === 'text') {
-    const maxBytes = effectiveMaxBytes(globalPolicy, opts)
+    const maxBytes = effectiveMaxBytes(opts)
     if (maxBytes !== undefined && r.text.length > maxBytes) {
       // length ≤ bytes: a fast reject; the exact byte count is checked in loadBytes when needed
       throw new Error(`IO policy: text is longer than maxBytes = ${maxBytes}`)

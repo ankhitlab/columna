@@ -356,6 +356,8 @@ export interface Backend {
 }
 
 export interface RuntimeOptions {
+  /** Own `persist()` cache for this runtime (tenant / request isolation). Default: the process-wide cache. */
+  persist?: import('./persist.js').PersistCache
   engine?: EngineKind
   webgpuMinRows?: number
   wasmMinRows?: number

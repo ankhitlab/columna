@@ -50,7 +50,7 @@ console.log('installed:', Object.keys(installed.dependencies ?? {}).join(', '))
 
 // 3. ESM consumer
 writeFileSync(path.join(app, 'esm.mjs'), `
-import { DataFrame, col, init, setIoPolicy, formatExecutionReport, ExecutionAbortedError, fromArrowIpc } from 'columna'
+import { DataFrame, col, init, setIoPolicy, formatExecutionReport, ExecutionAbortedError, fromArrowIpc, createSession } from 'columna'
 import { ttest1, quantile } from 'columna/advanced'
 import { DataFrame as CoreDataFrame } from 'columna/core'
 import { writeFileSync } from 'node:fs'
@@ -71,6 +71,13 @@ if (DataFrame.fromArrowIpc(ipc).shape[0] !== 3 || fromArrowIpc(ipc).numRows !== 
 const ac = new AbortController(); ac.abort()
 const aborted = await df.filter((c) => c.x.gt(1)).collect({ signal: ac.signal }).catch((e) => e)
 if (!(aborted instanceof ExecutionAbortedError)) throw new Error('abort: ' + aborted)
+// a session: own runtime + cache + IO floor
+const tenant = createSession({ io: { allowedDirs: [process.cwd()] }, persist: {} })
+const td = await tenant.readCsv({ path: 'data.csv' })
+const { report: r1 } = await td.lazy().groupBy('g').agg({ n: col('id').count() }).persist().collectWithReport()
+const { report: r2 } = await td.lazy().groupBy('g').agg({ n: col('id').count() }).collectWithReport()
+if (r1.cacheHit || !r2.cacheHit || tenant.persistCache.stats().entries !== 1) throw new Error('session persist')
+tenant.close()
 console.log('esm ok', frame.shape, report.backendsUsed.join('+'))
 `)
 console.log(run(process.execPath, ['esm.mjs'], app).trim())

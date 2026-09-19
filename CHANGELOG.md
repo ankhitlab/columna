@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQL `nRows` pushdown: single SELECT / WITH statements get `SELECT * FROM (…) AS __columna_q LIMIT n` (PostgreSQL,
   MySQL, SQLite, ClickHouse) or `SET ROWCOUNT n` (SQL Server); `pushdown: false` opts out; unknown dialect / several
   statements keep the client-side slice.
+- `Session` / `createSession({ io, runtime, persist, backends })`: per-tenant runtime (engine, strict, memory), own
+  `PersistCache` and an IO policy floor layered over `setIoPolicy()` (`IoLoadOptions.floors`); `df.withRuntime(rt)` /
+  `getRuntime()`; `Runtime.listBackends()`; `PersistCache` class exported (module-level persist helpers now delegate
+  to `defaultPersistCache`). `new Runtime({ memory })` no longer sets the process memory policy.
 - `denyPrivateHosts` now also resolves hostnames on Node (`dns.lookup`, all addresses, every redirect hop) and
   refuses names that resolve to private addresses; `IoPolicy.resolveHost` swaps the resolver (process-wide one is a
   floor). SECURITY.md documents connection pinning with an undici Agent for the rebinding TOCTOU.
