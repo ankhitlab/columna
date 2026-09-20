@@ -12,7 +12,7 @@
 
 Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary required. The engine (`@columna/arrow`, `@columna/runtime`) and the statistics (`@columna/advanced`) have no third-party runtime dependencies; `columna` / `@columna/core` add four IO packages (hyparquet ×3 for Parquet, SheetJS for Excel) that load lazily on first use — see [Packages](#packages). Speaks **Apache Arrow IPC** to DuckDB, Polars, pyarrow and `apache-arrow`.
 
-**Documentation** — versioned at [ankhitlab.github.io/columna](https://ankhitlab.github.io/columna/) (`latest/` = main, one directory per release, switcher on every page):
+**Documentation** — versioned at [ankhitlab.github.io/columna](https://ankhitlab.github.io/columna/) (`latest/` = main, one directory per release tag such as `v0.3.0`, switcher on every page):
 [API reference](https://ankhitlab.github.io/columna/latest/) ·
 [Migrating from Arquero / Polars / pandas](docs/migrating.md) ·
 [Compatibility promises](docs/compatibility.md) ·

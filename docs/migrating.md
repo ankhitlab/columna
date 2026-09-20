@@ -95,3 +95,31 @@ The cheat-sheet; the long form with worked examples is [pandas-to-columna.md](pa
 - **No mutable frames, no index.** Positional rows; keys are columns.
 - **Cancellation is per operator.** `collect({ signal })` lands between operators, not inside a kernel.
 - **Browser has no disk spill.** Memory budgets spill only on Node.
+
+## Upgrading from 0.2 to 0.3
+
+`0.3.0` is a **minor** under the 0.x rules in [compatibility.md](compatibility.md): new Tier 1 surfaces plus
+behaviour fixes that change results for some existing inputs. Install with `npm install columna@0.3.0`.
+
+### New APIs worth adopting
+
+- **Apache Arrow IPC:** prefer `toArrowIpc()` / `fromArrowIpc()` / `readArrowIpc` / `writeArrowIpc` for exchange
+  with Polars, DuckDB, pyarrow and `apache-arrow`. `toArrow()` / `fromArrow()` still work but are deprecated
+  (they speak columna's JSON `ArrowLike`, not Arrow).
+- **Cancellation / deadlines:** `collect({ signal, timeoutMs })` — rejects with `ExecutionAbortedError`.
+- **Sessions:** `createSession({ io, runtime, persist })` for per-tenant runtime, persist cache and IO policy floor;
+  `new Runtime({ memory })` no longer sets the process-wide memory policy (use `setMemoryPolicy` or
+  `collect({ memory })`).
+- **Non-blocking spill** and SQL `nRows` pushdown under memory / read options (see [operations.md](operations.md)).
+
+### Behaviour to re-check
+
+- `groupBy().agg({ x: 'count' })` counts **non-null** values of `x` on every kernel (was row-count on some fast paths).
+- `sort(...).head(k)` matches `sort(...).collect().slice(0, k)` for ties and NaN keys.
+- Join projection of collision names (`score_right`) and `select(col('x').alias('y'))` after a join keep the
+  expected schema.
+- `unique` keeps multi-key null rows and does not merge `null` with `NaN`.
+- CommonJS + `collect({ memory })` spill works (empty `import.meta` in the CJS bundle no longer breaks
+  `createRequire`).
+
+Full list: [CHANGELOG.md](../CHANGELOG.md) `[0.3.0]`.

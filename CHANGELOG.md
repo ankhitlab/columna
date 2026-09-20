@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-20
+
 ### Added
 
 - **Apache Arrow IPC** (no dependency): `DataFrame.toArrowIpc({ format?: 'stream' | 'file', batchRows? })`,
@@ -82,6 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spill temp files: per-process private subdirectory under the spill parent, `0700`/`0600` modes, exclusive create (`wx`), unlink on write failure.
 - `columna/advanced` DTS: discriminated `propTest` one-/two-sample options (`exact`|`normal` vs `normal`|`fisher`) with runtime method checks; `ancova` coerces boolean group labels to `"true"`/`"false"` instead of passing `Series.toArray()` booleans through.
 - Integration regressions: `packages/core/tests/review-1684ac4.test.ts`.
+- Conservative optimizer / AST: shared `expr_walk` so `str.concat` `other` is renamed and scanned like every other child; refuse join projection pushdown when the projection asks for a collision suffix (`score_right`); skip final `project` after join keep only for identity column picks (aliases like `col('score').alias('x')` keep the output name).
+- Fast-path kernels aligned with generic semantics: top-k ties break by original row index and NaN keys take the full radix sort; `agg({ x: 'count' })` counts non-null values on dense/Map paths; multi-key category `unique` keeps null-key rows; numeric `unique` distinguishes `null` from `NaN`; dense join / semi / anti only for integer build keys.
+- Composite Map keys for slow join / groupBy / unique use typed length-prefixed encoding (no `∅`+`\0` collisions).
+- CJS spill: `createRequire` falls back when `import.meta.url` is empty in the CJS bundle; browser `MemoryPolicy` scopes refuse a plain `collect` while another override is active.
+- CI: cooperative cancel parity tests get a 30s timeout so `pnpm test:coverage` on Node 22 no longer flakes at the Vitest 5s default.
 
 ## [0.2.1] - 2026-09-17
 

@@ -94,18 +94,26 @@ describe('cooperative execution ≡ plain execution', () => {
     heavy: heavy(),
   })
   for (const [name, plan] of Object.entries(plans())) {
-    it(`${name}: same rows, same kernels, and one trace event per execution unit`, async () => {
-      const plain = await plan.collectWithReport()
-      const coop = await plan.collectWithReport({ timeoutMs: 120_000 })
-      expect(coop.frame.toArray()).toEqual(plain.frame.toArray())
-      expect(coop.frame.dtypes).toEqual(plain.frame.dtypes)
-      // the root unit ran on the same node type with the same kernel as the plain path (fusions survive the yields)
-      const rootPlain = plain.report.events.at(-1)!
-      const rootCoop = coop.report.events.at(-1)!
-      expect({ node: rootCoop.node, kernel: rootCoop.kernel }).toEqual({ node: rootPlain.node, kernel: rootPlain.kernel })
-      expect(coop.report.events.length).toBeGreaterThanOrEqual(plain.report.events.length)
-      expect(coop.report.backendsUsed).toEqual(['cpu'])
-    })
+    // Heavy plan + coverage instrumentation exceeds Vitest's 5s default on CI (node 22).
+    it(
+      `${name}: same rows, same kernels, and one trace event per execution unit`,
+      async () => {
+        const plain = await plan.collectWithReport()
+        const coop = await plan.collectWithReport({ timeoutMs: 120_000 })
+        expect(coop.frame.toArray()).toEqual(plain.frame.toArray())
+        expect(coop.frame.dtypes).toEqual(plain.frame.dtypes)
+        // the root unit ran on the same node type with the same kernel as the plain path (fusions survive the yields)
+        const rootPlain = plain.report.events.at(-1)!
+        const rootCoop = coop.report.events.at(-1)!
+        expect({ node: rootCoop.node, kernel: rootCoop.kernel }).toEqual({
+          node: rootPlain.node,
+          kernel: rootPlain.kernel,
+        })
+        expect(coop.report.events.length).toBeGreaterThanOrEqual(plain.report.events.length)
+        expect(coop.report.backendsUsed).toEqual(['cpu'])
+      },
+      30_000,
+    )
   }
 })
 

@@ -1,6 +1,6 @@
 {
   "name": "columna",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Fluent DataFrame for TypeScript with WASM and WebGPU",
   "license": "MIT",
   "publishConfig": {
