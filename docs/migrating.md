@@ -68,6 +68,8 @@ core, i64 / nested types and the streaming engine.
 
 ## pandas → columna
 
+The cheat-sheet; the long form with worked examples is [pandas-to-columna.md](pandas-to-columna.md).
+
 | pandas | columna | Notes |
 |---|---|---|
 | `pd.DataFrame(rows)` / `pd.read_csv` | `DataFrame.fromRows(rows)` / `DataFrame.readCsv` | No index: rows are positional; `set_index` has no equivalent — keep the key as a column. |

@@ -66,3 +66,4 @@ packages/browser-smoke/dist
 packages/studio/
 coverage/
 docs/api/
+site/

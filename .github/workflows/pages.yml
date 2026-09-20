@@ -1,12 +1,14 @@
 name: API reference → GitHub Pages
 
-# Publishes docs/api (typedoc over the columna umbrella entry points) to GitHub Pages on every push to main.
-# First run enables Pages for the repository (configure-pages `enablement: true`); afterwards the site lives at
-# https://<owner>.github.io/<repo>/.
+# Publishes the versioned documentation site to GitHub Pages on every push to main and every release tag:
+# latest/ (main) plus one directory per vX.Y.Z tag (typedoc API reference + the guides under docs/), a version
+# switcher on every page and versions.json. First run enables Pages (configure-pages `enablement: true`);
+# afterwards the site lives at https://<owner>.github.io/<repo>/.
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # every release tag is built into its own directory
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -30,16 +34,16 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm docs:api
-      # coverage badge next to the API reference: README embeds it through shields.io/endpoint
+      - run: pnpm docs:site
+      # coverage badge next to the site root: README embeds it through shields.io/endpoint
       - run: pnpm test:coverage
-      - run: node scripts/coverage-summary.mjs coverage/coverage-summary.json --badge docs/api/coverage.json
+      - run: node scripts/coverage-summary.mjs coverage/coverage-summary.json --badge site/coverage.json
       - uses: actions/configure-pages@v5
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/api
+          path: site
 
   deploy:
     needs: build

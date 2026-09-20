@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.png binary
+*.arrow binary
+*.arrows binary
+*.parquet binary
+*.wasm binary
+*.node binary

@@ -12,7 +12,15 @@
 
 Typed DataFrames plus a **Minitab-class statistics library** for TypeScript — in Node.js and the browser, with no native binary required. The engine (`@columna/arrow`, `@columna/runtime`) and the statistics (`@columna/advanced`) have no third-party runtime dependencies; `columna` / `@columna/core` add four IO packages (hyparquet ×3 for Parquet, SheetJS for Excel) that load lazily on first use — see [Packages](#packages). Speaks **Apache Arrow IPC** to DuckDB, Polars, pyarrow and `apache-arrow`.
 
-API reference: [ankhitlab.github.io/columna](https://ankhitlab.github.io/columna/) (`pnpm docs:api`; published by CI on GitHub Pages). Coming from Arquero / Polars / pandas: [docs/migrating.md](docs/migrating.md).
+**Documentation** — versioned at [ankhitlab.github.io/columna](https://ankhitlab.github.io/columna/) (`latest/` = main, one directory per release, switcher on every page):
+[API reference](https://ankhitlab.github.io/columna/latest/) ·
+[Migrating from Arquero / Polars / pandas](docs/migrating.md) ·
+[Compatibility promises](docs/compatibility.md) ·
+[Production operations guide](docs/operations.md) ·
+[Troubleshooting & incident corpus](docs/troubleshooting.md) ·
+[Positioning](docs/positioning.md) ·
+[Security](SECURITY.md) ·
+[Changelog](CHANGELOG.md)
 
 The DataFrame part competes with Arquero (same job; on 2M rows columna is 5–10× faster per operation and uses ~3× less memory), overlaps with DuckDB-Wasm (which is a real SQL engine and reads files faster) and is not a substitute for Polars or DuckDB native when a server can run one. What none of them have is the statistics layer: ~250 procedures — hypothesis tests, ANOVA, regression with full diagnostics, DOE, SPC, capability, reliability, time series, multivariate — each checked against scipy / numpy / NIST references. Measured comparison and an honest "when to use what": [docs/positioning.md](docs/positioning.md).
 
@@ -739,7 +747,10 @@ GPU results are **bit-identical to the CPU**: the filter kernel compares `i32` /
 - **release** (on a `vX.Y.Z` tag): the same gates, then a GitHub Release with the packed tarball, its SHA-256 and the
   CHANGELOG section, and npm publish with provenance — see [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 - **docs**: the API reference is generated with typedoc from the `columna` entry points and uploaded as the
-  `api-reference` artifact; the `pages` workflow publishes it to GitHub Pages on every push to `main`.
+  `api-reference` artifact, and the built package is checked against the public API snapshot
+  (`docs/api-surface.json` — removing a public name fails the build; see
+  [docs/compatibility.md](docs/compatibility.md)). The `pages` workflow publishes the **versioned** site
+  (`pnpm docs:site`: `latest/` plus every release tag, with the guides) on every push to `main` and every tag.
 - **consumer**: `pnpm pack` of every published package installed with npm into a clean project; ESM, CommonJS, the
   `columna/core` and `columna/advanced` subpaths and the TypeScript declarations are exercised (`pnpm test:consumer`).
 - **browser**: the built `columna` bundle is bundled by Vite with no aliases and run in headless Chromium with

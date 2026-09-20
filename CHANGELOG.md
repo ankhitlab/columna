@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQL `nRows` pushdown: single SELECT / WITH statements get `SELECT * FROM (…) AS __columna_q LIMIT n` (PostgreSQL,
   MySQL, SQLite, ClickHouse) or `SET ROWCOUNT n` (SQL Server); `pushdown: false` opts out; unknown dialect / several
   statements keep the client-side slice.
+- Documentation set: [compatibility.md](docs/compatibility.md) (tiers, 0.x SemVer rules, deprecation, format
+  and runtime support promises) enforced by `docs/api-surface.json` + `api-surface.test.ts` / `pnpm api:check`;
+  [operations.md](docs/operations.md) (startup, sessions, timeouts, memory, spill directory, workers, observability,
+  shutdown, upgrade gate); [troubleshooting.md](docs/troubleshooting.md) (error index + the incident corpus with
+  commit references); versioned documentation site (`pnpm docs:site`: `latest/` + every release tag, version
+  switcher, `versions.json`) published by the `pages` workflow on pushes and tags; guides included in the typedoc site.
+- `columna` umbrella now exports `setMemoryPolicy` / `getMemoryPolicy` / `clearMemoryPolicy` / `clearPersistCache` /
+  `persistCacheStats` / `estimateTableBytes` / `closeParallelPool` (the README already used them).
 - `Session` / `createSession({ io, runtime, persist, backends })`: per-tenant runtime (engine, strict, memory), own
   `PersistCache` and an IO policy floor layered over `setIoPolicy()` (`IoLoadOptions.floors`); `df.withRuntime(rt)` /
   `getRuntime()`; `Runtime.listBackends()`; `PersistCache` class exported (module-level persist helpers now delegate

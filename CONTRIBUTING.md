@@ -47,6 +47,13 @@ pnpm --filter columna build
 
 Use the GitHub issue templates. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 
+## Public API changes
+
+`docs/api-surface.json` records every public export and class member; `packages/columna/tests/api-surface.test.ts`
+fails when one disappears. Adding is free (run `pnpm api:snapshot` after `pnpm build` to record it); removing or
+renaming needs a deprecation cycle first — see [docs/compatibility.md](docs/compatibility.md) — and the snapshot
+edit goes in the same commit as the CHANGELOG *Breaking* line.
+
 ## Releasing
 
 Only `columna` is published; the `@columna/*` packages are bundled into it. A release is a tag:

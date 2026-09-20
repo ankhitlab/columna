@@ -33,7 +33,10 @@
     "test:coverage": "vitest run --coverage",
     "docs:api": "typedoc",
     "release:prepare": "node scripts/release-prepare.mjs",
-    "test:interop": "vitest run --config vitest.interop.config.ts"
+    "test:interop": "vitest run --config vitest.interop.config.ts",
+    "api:snapshot": "node scripts/api-surface.mjs",
+    "api:check": "node scripts/api-surface.mjs --check",
+    "docs:site": "node scripts/build-site.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

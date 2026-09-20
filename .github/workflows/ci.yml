@@ -73,6 +73,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm docs:api
+      # the public API surface snapshot must match the built package (docs/compatibility.md)
+      - run: pnpm api:check
       - uses: actions/upload-artifact@v4
         with:
           name: api-reference

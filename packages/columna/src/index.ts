@@ -48,7 +48,15 @@ export {
   estimatePlanRows,
   tryLoadNativeKernels,
   isNativeKernelsLoaded,
+  closeParallelPool,
   setNativeKernels,
+  setMemoryPolicy,
+  getMemoryPolicy,
+  clearMemoryPolicy,
+  clearPersistCache,
+  persistCacheStats,
+  estimateTableBytes,
+  type MemoryPolicy,
 } from '@columna/runtime'
 export { WasmBackend, tryLoadRustKernels, writeParquetLike, readParquetLike, wasmStringContains, wasmStringLength } from '@columna/wasm'
 export { WebGpuBackend, detectWebGPU } from '@columna/webgpu'
