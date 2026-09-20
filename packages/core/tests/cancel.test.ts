@@ -41,45 +41,57 @@ describe('collect({ signal })', () => {
     expect(e.message).toMatch(/user left the page/)
   })
 
-  it('an abort fired from a timer is observed between operators — the plan stops early', async () => {
-    const t0 = performance.now()
-    const full = await heavy().collect()
-    const fullMs = performance.now() - t0
-    const ac = new AbortController()
-    const t1 = performance.now()
-    setTimeout(() => ac.abort(), 5)
-    const err = await heavy().collect({ signal: ac.signal }).catch((e: unknown) => e)
-    const abortedMs = performance.now() - t1
-    expect(err).toBeInstanceOf(ExecutionAbortedError)
-    expect((err as ExecutionAbortedError).reason).toBe('signal')
-    expect((err as ExecutionAbortedError).node).not.toBe('start')
-    // stopped well before the whole plan would have finished
-    expect(abortedMs).toBeLessThan(fullMs * 0.8)
-    expect(full.shape[0]).toBe(97)
-  })
+  // Full heavy() baseline + second run under coverage exceeds Vitest's 5s default on CI.
+  it(
+    'an abort fired from a timer is observed between operators — the plan stops early',
+    async () => {
+      const t0 = performance.now()
+      const full = await heavy().collect()
+      const fullMs = performance.now() - t0
+      const ac = new AbortController()
+      const t1 = performance.now()
+      setTimeout(() => ac.abort(), 5)
+      const err = await heavy().collect({ signal: ac.signal }).catch((e: unknown) => e)
+      const abortedMs = performance.now() - t1
+      expect(err).toBeInstanceOf(ExecutionAbortedError)
+      expect((err as ExecutionAbortedError).reason).toBe('signal')
+      expect((err as ExecutionAbortedError).node).not.toBe('start')
+      // stopped well before the whole plan would have finished
+      expect(abortedMs).toBeLessThan(fullMs * 0.8)
+      expect(full.shape[0]).toBe(97)
+    },
+    30_000,
+  )
 
-  it('the cooperative path yields: an interval keeps ticking while the plan runs', async () => {
-    let ticks = 0
-    const timer = setInterval(() => ticks++, 1)
-    try {
-      await heavy().collect({ signal: new AbortController().signal })
-    } finally {
-      clearInterval(timer)
-    }
-    expect(ticks).toBeGreaterThan(3)
-  })
+  it(
+    'the cooperative path yields: an interval keeps ticking while the plan runs',
+    async () => {
+      let ticks = 0
+      const timer = setInterval(() => ticks++, 1)
+      try {
+        await heavy().collect({ signal: new AbortController().signal })
+      } finally {
+        clearInterval(timer)
+      }
+      expect(ticks).toBeGreaterThan(3)
+    },
+    30_000,
+  )
 })
 
 describe('collect({ timeoutMs })', () => {
-  it('a deadline is enforced without any timer firing (checked synchronously between operators)', async () => {
-    const err = await heavy().collect({ timeoutMs: 1 }).catch((e: unknown) => e)
-    expect(err).toBeInstanceOf(ExecutionAbortedError)
-    const e = err as ExecutionAbortedError
-    expect(e.reason).toBe('timeout')
-    expect(e.elapsedMs).toBeGreaterThanOrEqual(1)
-    expect(e.message).toMatch(/timeoutMs/)
-  })
-
+  it(
+    'a deadline is enforced without any timer firing (checked synchronously between operators)',
+    async () => {
+      const err = await heavy().collect({ timeoutMs: 1 }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(ExecutionAbortedError)
+      const e = err as ExecutionAbortedError
+      expect(e.reason).toBe('timeout')
+      expect(e.elapsedMs).toBeGreaterThanOrEqual(1)
+      expect(e.message).toMatch(/timeoutMs/)
+    },
+    30_000,
+  )
   it('rejects a non-positive timeout up front', async () => {
     await expect(heavy().collect({ timeoutMs: 0 })).rejects.toThrow(RangeError)
   })
