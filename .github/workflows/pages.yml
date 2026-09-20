@@ -2,8 +2,8 @@ name: API reference → GitHub Pages
 
 # Publishes the versioned documentation site to GitHub Pages on every push to main and every release tag:
 # latest/ (main) plus one directory per vX.Y.Z tag (typedoc API reference + the guides under docs/), a version
-# switcher on every page and versions.json. First run enables Pages (configure-pages `enablement: true`);
-# afterwards the site lives at https://<owner>.github.io/<repo>/.
+# switcher on every page and versions.json. Site: https://<owner>.github.io/<repo>/.
+# Pages must be enabled once (Settings → Pages → Source: GitHub Actions); GITHUB_TOKEN cannot create the site.
 
 on:
   push:
@@ -39,8 +39,6 @@ jobs:
       - run: pnpm test:coverage
       - run: node scripts/coverage-summary.mjs coverage/coverage-summary.json --badge site/coverage.json
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
