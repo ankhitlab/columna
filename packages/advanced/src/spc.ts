@@ -419,7 +419,7 @@ function shewhartXbar(groups: number[][], useS: boolean, options: ControlChartOp
     companionCenter,
     companionUcl,
     companionLcl,
-    typeof companionUcl === 'number' ? (companionUcl - companionCenter) / 3 || 1 : companionUcl.map((u, i) => (u - (typeof companionLcl === 'number' ? companionCenter : companionCenter)) / 3 || 1),
+    typeof companionUcl === 'number' ? (companionUcl - companionCenter) / 3 || 1 : companionUcl.map((u) => (u - (typeof companionLcl === 'number' ? companionCenter : companionCenter)) / 3 || 1),
     [1],
     ns,
   )
@@ -489,7 +489,7 @@ function attributeChart(
 
   if (type === 'p' || type === 'laney-p') {
     const p = counts.map((c, i) => c / sizes[i]!)
-    const pBar = options.center ?? counts.reduce((s, c, i) => s + c, 0) / sizes.reduce((s, n) => s + n, 0)
+    const pBar = options.center ?? counts.reduce((s, c) => s + c, 0) / sizes.reduce((s, n) => s + n, 0)
     const sigmaI = sizes.map((n) => Math.sqrt((pBar * (1 - pBar)) / n))
     if (type === 'p') {
       const ucl = sigmaI.map((s) => Math.min(1, pBar + 3 * s))

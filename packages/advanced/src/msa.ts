@@ -355,7 +355,7 @@ export function gageLinearity(
     seIntercept,
     tSlope,
     pSlope,
-    pctLinearity: 100 * Math.abs(slope),
+    pctLinearity,
     bias: mb,
     seBias,
     tBias,
@@ -443,10 +443,7 @@ function cohenKappa(a: ArrayLike<string | number | null>, b: ArrayLike<string | 
   let pe = 0
   for (let i = 0; i < k; i++) pe += (row[i]! / N) * (col[i]! / N)
   const kappa = (po - pe) / (1 - pe)
-  // Fleiss–Cohen SE under null
-  let seTerm = 0
-  for (let i = 0; i < k; i++) seTerm += (row[i]! / N) * (col[i]! / N) * (1 - (row[i]! / N) * (col[i]! / N) * (1 - (row[i]! + col[i]!) / N) ** 2)
-  // Simpler asymptotic SE: √(pe/(N(1−pe)))
+  // Asymptotic SE under null: √(pe/(N(1−pe)²))
   const se = Math.sqrt(pe / (N * (1 - pe) ** 2))
   const z = kappa / se
   return { method: 'cohen', kappa, se, z, pValue: 2 * STD.sf(Math.abs(z)), n: N, raters: 2, categories: k }

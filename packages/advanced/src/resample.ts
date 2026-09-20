@@ -70,7 +70,6 @@ export function permutationTest(
   const x = Array.from(cleanNumbers(a))
   const y = Array.from(cleanNumbers(b))
   const n1 = x.length
-  const n2 = y.length
   const nPerm = options.nPerm ?? 999
   const alternative = options.alternative ?? 'two-sided'
   const kind = options.statistic ?? 'mean'

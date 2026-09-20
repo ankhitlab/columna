@@ -31,7 +31,6 @@ function idx(n: number, offset = 0): number[] {
 }
 
 function fromControlChart(r: ControlChartResult, prefix = ''): PlotSeries[] {
-  const n = r.points.length
   const x = r.points.map((p) => p.index)
   const out: PlotSeries[] = [
     { name: `${prefix}data`, x, y: r.points.map((p) => p.value), role: 'data' },

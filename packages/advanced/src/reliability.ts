@@ -922,14 +922,10 @@ function fitCoxNewton(
   maxIter: number,
 ): { beta: number[]; logLik: number; iterations: number; hess: number[][] } {
   const beta = new Array(p).fill(0)
-  let logLik = -Infinity
   let iter = 0
-  let hess = Array.from({ length: p }, () => new Array(p).fill(0))
   for (iter = 0; iter < maxIter; iter++) {
     const ev = coxPartialLL(obs, beta, p)
-    logLik = ev.ll
-    hess = ev.hess
-    const negH = hess.map((row) => row.map((v) => -v))
+    const negH = ev.hess.map((row) => row.map((v) => -v))
     const delta = solveNewton(negH, ev.score)
     let maxStep = 0
     for (let j = 0; j < p; j++) {
@@ -1417,14 +1413,10 @@ export function fineGray(
   }
 
   const beta = new Array(p).fill(0)
-  let logLik = -Infinity
   let iter = 0
-  let hess = Array.from({ length: p }, () => new Array(p).fill(0))
   for (iter = 0; iter < maxIter; iter++) {
     const ev = fgPartial(beta)
-    logLik = ev.ll
-    hess = ev.hess
-    const negH = hess.map((row) => row.map((v) => -v))
+    const negH = ev.hess.map((row) => row.map((v) => -v))
     const delta = solveNewton(negH, ev.score)
     let maxStep = 0
     for (let j = 0; j < p; j++) {

@@ -928,7 +928,6 @@ export function glmm(
       for (let gi = 0; gi < g; gi++) {
         let hessU = -1 / sigmaU2
         let hessS = -1 / sigmaS2
-        let hessUS = rho / Math.sqrt(Math.max(1e-12, sigmaU2 * sigmaS2)) // approx off-diag precision
         for (let i = 0; i < n; i++) {
           if (idx[i] !== gi) continue
           const zi = slopeX[i]!
@@ -944,7 +943,6 @@ export function glmm(
           } else d2 = -mu
           hessU += d2
           hessS += d2 * zi * zi
-          hessUS += d2 * zi
         }
         // Cholesky-scale proposal from Hessian (diagonal fallback if indefinite)
         const scaleU = 1 / Math.sqrt(Math.max(1e-8, -hessU))

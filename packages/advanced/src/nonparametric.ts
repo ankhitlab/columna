@@ -348,7 +348,6 @@ export function brunnerMunzel(
     i = j + 1
   }
   let r1 = 0
-  let r2 = 0
   const mid1: number[] = []
   const mid2: number[] = []
   // within-group ranks for variance
@@ -371,12 +370,10 @@ export function brunnerMunzel(
       r1 += ranks[i]!
       mid1.push(ranks[i]! - rankIn(xSorted, all[i]!.v))
     } else {
-      r2 += ranks[i]!
       mid2.push(ranks[i]! - rankIn(ySorted, all[i]!.v))
     }
   }
   const m1 = r1 / n1
-  const m2 = r2 / n2
   const pHat = (m1 - (n1 + 1) / 2) / n2
   let s1 = 0
   let s2 = 0

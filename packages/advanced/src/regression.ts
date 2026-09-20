@@ -5,7 +5,7 @@
  * Durbin–Watson, information criteria and prediction with confidence / prediction intervals.
  */
 import { f as fDist, t as tDist } from './dist.js'
-import { fromColumns, lstsq, matrix, matvec, type Matrix } from './linalg.js'
+import { lstsq, matrix, matvec, type Matrix } from './linalg.js'
 
 export type Column = ArrayLike<number | null | undefined>
 /** Predictors as named columns, an array of columns, or an array of rows. */
