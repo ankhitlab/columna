@@ -48,6 +48,14 @@ Default size: **1M** rows (heavy reshape ops auto-skipped). Median of 3 runs aft
 
 ## Run
 
+Native JS competitors (`duckdb`, `nodejs-polars`) are listed in the root
+`pnpm.neverBuiltDependencies` so CI/`pnpm install` never compiles them from
+source. For `compare:js` with those engines, run once after install:
+
+```bash
+pnpm rebuild duckdb nodejs-polars
+```
+
 ```bash
 py -3 -m pip install pandas polars numpy
 pnpm build
