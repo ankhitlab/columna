@@ -47,7 +47,8 @@ jobs:
       - name: pack
         run: |
           mkdir -p release
-          pnpm --filter columna pack --pack-destination "$PWD/release"
+          # `pnpm --filter … pack` can inherit a recursive flag from the workspace CLI and fail.
+          pnpm --dir packages/columna pack --pack-destination "$PWD/release"
           (cd release && sha256sum columna-*.tgz > SHA256SUMS)
           cat release/SHA256SUMS
           node scripts/changelog-section.mjs "$VERSION" > release/notes.md
