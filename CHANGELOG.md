@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Correctness release: no new operators; four defects fixed and the semantics that allowed them made explicit.
+
+### Fixed
+
+- **`simpson(y, x)` silently computed the trapezoid whenever `x` was given.** Now SciPy's algorithm
+  (`scipy.integrate.simpson`, ≥ 1.11): per-pair parabolic weights for unequal widths, Cartwright's correction
+  for the last interval when the sample count is even, trapezoid for two samples; `x` may also be a spacing `dx`.
+  Mismatched lengths and non-strictly-monotonic `x` throw. `trapz` accepts `dx` and checks lengths. Verified
+  against 35 SciPy cases, polynomial exactness (degree ≤ 3 on uniform odd grids, ≤ 2 otherwise) and the
+  fourth-order convergence rate (`tests/quadrature.test.ts`).
+- **`LazyFrame.concat()` ran on the process default runtime**, dropping the session (its cache, memory policy,
+  engine). Multi-input operators (concat, join incl. cross / semi / anti, as-of join) now follow one rule —
+  `resolveRuntime`: unbound (process-default) inputs adopt the bound runtime; inputs bound to two different
+  sessions throw `RuntimeMismatchError` unless `{ runtime }` is passed; the receiver's `engine()` fork is kept when it
+  belongs to that lineage. `Series.valueCounts()` and `DataFrame.nunique()` keep the frame's runtime too.
+- **A strict engine request could be answered by a cached result another engine computed.** Cache entries now
+  record their provenance (requested, dispatched, strict, `backendsUsed`); `engine(X, { strict: true })` is served
+  only from an entry X produced, otherwise the plan runs (X executes or `EngineStrictError`). A failed strict run
+  no longer stores its CPU result. Cache-hit reports carry the producing engines (`dispatched`, `backendsUsed`,
+  `cachedFrom`) instead of claiming `cpu`.
+- **Silent 64-bit precision loss.** Arrow Int64 / UInt64 became `Number` (9007199254740993 → …992),
+  `JSON.parse` rounded large integer literals, and nanosecond timestamps were rounded before scaling. All readers
+  now apply an `Int64Policy` per column: exact f64 when every value is within ±(2^53 − 1), otherwise
+  `PrecisionLossError` (default, with column / row / exact value), `int64: 'string'` (exact decimal strings) or
+  `int64: 'number'` (explicit nearest double). JSON integer literals beyond 2^53 − 1 are read exactly; timestamps
+  convert in BigInt. Boundary suite: 2^31, 2^32, 2^53 − 1, 2^53, 2^53 + 1, INT64_MAX, INT64_MIN, UINT64_MAX through
+  `apache-arrow`, Parquet INT64, JSON, driver BigInts and BigInt rows.
+
+### Changed
+
+- **`DataFrame.fromColumns` copies by default** (`copy: true`); a frame no longer aliases the caller's arrays unless
+  `{ copy: false }` is passed, and such zero-copy frames are never cached by `persist()` (the report's
+  `cacheSkipped` says why). Plans that call `mapElements` are not cached unless `persist({ trustUdfs: true })`.
+- **`PersistCache` metadata is bounded**: `maxEntries` (default 256), `maxPending` (default 1024 marks), `ttlMs`,
+  `pendingTtlMs`, O(1) LRU; `stats()` adds `pending`, `hits`, `misses`, `evictions`, `pendingEvictions`,
+  `expired`, `skipped`, `strictBypasses`. New `probe()`.
+- Parquet INT64 and SQL driver BigInts beyond 2^53 − 1 used to become per-value strings inside an otherwise
+  numeric column; they now follow the `Int64Policy` (default: `PrecisionLossError`). BigInt row values given to
+  `fromRows` become a numeric column (they became text categories).
+- Node 18 is back in the CI matrix (lint, build, typecheck, tests, interop), matching `engines: >=18`. The slow
+  Node 18 installs came from compiling bench-only native modules, now never built in CI (`better-sqlite3` added to
+  `neverBuiltDependencies`); the published package never pulled them.
+- The API-surface snapshot no longer records TypeScript `private` members (they are runtime-visible but never
+  public); seven such names left the snapshot, no public name did.
+
 ## [0.3.0] - 2026-09-20
 
 ### Added

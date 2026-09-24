@@ -40,6 +40,10 @@ When something is slow rather than wrong, start with `collectWithReport()` — s
 | `rolling: window must be a positive integer` | `rolling` | Validation. |
 | `<test> needs at least N observations` / `alpha must be in (0, 1)` / `alternative must be …` | `columna/advanced` | Domain checks of statistical procedures; the reference implementations reject the same inputs. |
 | `Session is closed` | `Session` | `close()` was called; frames it produced stay usable, the session does not. |
+| `<reader>: column "…" row N holds …, which a double cannot represent exactly` (`PrecisionLossError`) | Arrow IPC, Parquet, JSON, SQL, `fromRows` | A 64-bit integer beyond ±(2^53 − 1). IDs / join keys: `{ int64: 'string' }`. Measurements where the nearest double is acceptable: `{ int64: 'number' }`. |
+| `…: the inputs are bound to N different runtimes (sessions)` (`RuntimeMismatchError`) | concat, join, as-of join | Frames of two sessions were combined. `session.bind(frame)` one of them, or pass `{ runtime }`. |
+| `simpson: x must be finite and strictly monotonic` / `x has N samples, y has M` | `simpson`, `trapz` | Repeated or unsorted sample positions; sort by x and drop duplicates first. |
+| report `cacheSkipped: reads caller-owned buffers…` / `…calls a UDF…` | `persist()` | Not an error: the plan ran and was not cached. Build the frame with the default `fromColumns` copy, or `persist({ trustUdfs: true })` for pure functions. |
 
 ## B. Incident corpus
 
@@ -82,6 +86,16 @@ join keys decode categories or remap the smaller dictionary. Guard: `join-dictio
 
 ### Numerics
 
+**`simpson(y, x)` was the trapezoid** (fixed in the correctness release after 0.3.0, external review). With an
+explicit `x`, the function returned `trapz(y, x)`; `∫x² dx` on any grid was off by O(h²). The suite stayed green because the
+only test used the `x`-less path on a symmetric input. Fix: SciPy's algorithm. Guard: SciPy fixtures plus polynomial
+exactness and convergence-order properties (`quadrature.test.ts`) — the property tests would have caught it on day one.
+
+**Int64 → Number, JSON.parse and ns timestamps rounded silently** (same release). `fromArrowIpc` converted Int64 with
+`Number()`; `JSON.parse` rounds integer literals beyond 2^53; ns timestamps were rounded before scaling to ms. Fix:
+one `Int64Policy` across readers (error by default), an exact JSON integer pass, BigInt timestamp arithmetic. Guard:
+boundary suites in `int64-precision.test.ts` and `packages/arrow-interop`.
+
 **Poisson upper tail wrong by 2·10⁻⁷ at λ = 10⁵** (`14f55eb`, adversarial suite). The incomplete-gamma series
 stopped after 1000 terms. Fix: iteration budget grows with √a. Guard: `adversarial.test.ts` tails to 10⁻³⁰⁰.
 
@@ -107,6 +121,21 @@ string in a numeric column threw. Fix: full-column inference with widening. Guar
 2^31 widens".
 
 ### Runtime and memory
+
+**`LazyFrame.concat` dropped the session runtime** (external review). The static constructor built its result on
+the process default, so a tenant's concatenated plan used the process cache and memory policy. Fix: `resolveRuntime`
+for every multi-input operator; mixing sessions is an error. Guard: `runtime-propagation.test.ts` runs every
+multi-input operator from both receivers, same-session / unbound / cross-session.
+
+**Strict engine requests answered from the cache** (external review). The persist lookup ran before engine
+dispatch, so `engine('webgpu', { strict: true })` could return a CPU-computed table with `cacheHit: true`; a failed
+strict run also stored its CPU result first. Fix: provenance on entries, strict-aware probe, store only after the
+strict check. Guard: `persist-semantics.test.ts` with a stand-in accelerator backend.
+
+**Mutable inputs and UDF closures behind cached results** (external review). `fromColumns` aliased caller arrays and
+`persist()` keyed plans by table identity, so writing to the array after the first `collect()` left a stale cached
+result; a UDF reading mutable state had the same problem. Fix: copy by default, refuse zero-copy and untrusted-UDF
+plans. Guard: same file.
 
 **Memory policy leaked across concurrent requests** (`ac58937`). A per-call `collect({ memory })` set a module
 variable that another in-flight request read. Fix: `AsyncLocalStorage` scope on Node; the browser refuses
@@ -146,6 +175,14 @@ the package to `pnpm.onlyBuiltDependencies` or run `pnpm rebuild better-sqlite3`
 **`apache-arrow` version mismatch with DuckDB-Wasm** (browser smoke). `tableToIPC` from apache-arrow 21 over a
 Table produced by DuckDB's bundled apache-arrow 17 yielded bytes without a schema message. Fix: take DuckDB's
 own IPC bytes (`conn.useUnsafe((db, id) => db.runQuery(id, sql))`) — no apache-arrow in the loop.
+
+**Node 18 CI jobs took 20+ minutes** (dropped from the matrix in `cafa5ed`, restored after this investigation).
+The published package was never involved — `npm install columna` pulls 7 pure-JS packages in seconds on any Node
+version, and the SQL / Kafka drivers are optional peers npm does not install. The time went into `pnpm install` of
+the *workspace*: `packages/bench` (private) depends on `duckdb`, which has no Node 18 prebuild, so its install
+script compiled DuckDB from source. Fix: `pnpm.neverBuiltDependencies` for the bench-only natives (`duckdb`,
+`nodejs-polars`) and for `better-sqlite3` (no test needs its binary), so no install step depends on a prebuild
+existing for the running Node. Rebuild them locally (`pnpm rebuild duckdb`) only to run the comparison benches.
 
 **CRLF line endings on Windows contributors' machines**. Tools that rewrite files (`sed -i`) strip `\r` and
 produce whole-file diffs. `.gitattributes` normalises on commit; edit with CR-aware tooling.

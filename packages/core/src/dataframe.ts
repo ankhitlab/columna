@@ -4,6 +4,10 @@ import {
   fromArrowIpc,
   fromArrowLike,
   getRowField,
+  isSafeBigInt,
+  PrecisionLossError,
+  type Int64Policy,
+  markBorrowedColumn,
   getValue,
   inferDtype,
   inferDtypeFromValues,
@@ -16,6 +20,7 @@ import {
   toArrowLike,
   toRowObjects,
   type ArrowIpcWriteOptions,
+  type ArrowIpcReadOptions,
   type ArrowLike,
   type Column,
   type DType,
@@ -24,6 +29,8 @@ import {
 } from '@columna/arrow'
 import {
   getDefaultRuntime,
+  resolveRuntime,
+  type PersistOptions,
   executeCpu,
   type AggKind,
   type CorrMethod,
@@ -382,9 +389,12 @@ export class LazyFrame<S extends Row = Row> {
       rSuffix?: string
       /** Assert join-key uniqueness before joining. */
       validate?: '1:1' | '1:m' | 'm:1'
+      /** Runtime that executes the result when the inputs are bound to different sessions (see `resolveRuntime`). */
+      runtime?: Runtime
     } = {},
   ): LazyFrame<JoinResult<S, R, How>> {
     const rightPlan = other instanceof DataFrame ? other.lazy().plan : other.plan
+    const runtime = resolveRuntime(`join(${options.how ?? 'inner'})`, [this.runtime, other.getRuntime()], { receiver: this.runtime, explicit: options.runtime })
     const how = options.how ?? 'inner'
     const rSuffix = options.rSuffix ?? options.suffix
     const lSuffix = options.lSuffix
@@ -402,7 +412,7 @@ export class LazyFrame<S extends Row = Row> {
           rSuffix,
           validate,
         },
-        this.runtime,
+        runtime,
       )
     }
     const on = options.on ? (Array.isArray(options.on) ? options.on : [options.on]) : undefined
@@ -429,7 +439,7 @@ export class LazyFrame<S extends Row = Row> {
         rSuffix,
         validate,
       },
-      this.runtime,
+      runtime,
     )
   }
 
@@ -468,9 +478,10 @@ export class LazyFrame<S extends Row = Row> {
 
   joinAsof<R extends Row>(
     other: LazyFrame<R> | DataFrame<R>,
-    options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest' },
+    options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest'; runtime?: Runtime },
   ): LazyFrame<JoinResult<S, R, 'left'>> {
     const rightPlan = other instanceof DataFrame ? other.lazy().plan : other.plan
+    const runtime = resolveRuntime('joinAsof', [this.runtime, other.getRuntime()], { receiver: this.runtime, explicit: options.runtime })
     return new LazyFrame<any>(
       {
         type: 'asofJoin',
@@ -480,7 +491,7 @@ export class LazyFrame<S extends Row = Row> {
         rightOn: options.rightOn ?? options.leftOn,
         strategy: options.strategy ?? 'backward',
       },
-      this.runtime,
+      runtime,
     )
   }
 
@@ -622,12 +633,25 @@ export class LazyFrame<S extends Row = Row> {
     return fn(this)
   }
 
-  static concat<F extends LazyFrame<any> | DataFrame<any>>(frames: F[], how: 'vertical' | 'horizontal' = 'vertical'): LazyFrame<F extends LazyFrame<infer X> ? X : F extends DataFrame<infer Y> ? Y : Row> {
-    return new LazyFrame<any>({
-      type: 'concat',
-      frames: frames.map((f) => (f instanceof DataFrame ? f.lazy().plan : f.plan)),
-      how,
-    })
+  /**
+   * Stack frames vertically (same columns) or horizontally. The result runs on the inputs' runtime — a session's
+   * frames stay on that session — following `resolveRuntime`: unbound (process-default) inputs adopt it, frames
+   * of two different sessions throw `RuntimeMismatchError` unless `{ runtime }` says which one executes.
+   */
+  static concat<F extends LazyFrame<any> | DataFrame<any>>(
+    frames: F[],
+    how: 'vertical' | 'horizontal' = 'vertical',
+    options: { runtime?: Runtime } = {},
+  ): LazyFrame<F extends LazyFrame<infer X> ? X : F extends DataFrame<infer Y> ? Y : Row> {
+    const runtime = resolveRuntime(`concat(${how})`, frames.map((f) => f.getRuntime()), { explicit: options.runtime })
+    return new LazyFrame<any>(
+      {
+        type: 'concat',
+        frames: frames.map((f) => (f instanceof DataFrame ? f.lazy().plan : f.plan)),
+        how,
+      },
+      runtime,
+    )
   }
 
   /**
@@ -652,10 +676,13 @@ export class LazyFrame<S extends Row = Row> {
 
   /**
    * Mark this plan for LRU caching: the next `collect` materializes and stores the table; subsequent
-   * collects of an identical plan return the cached table (`report.cacheHit`).
+   * collects of an identical plan return the cached table (`report.cacheHit`). Not cached (the report's
+   * `cacheSkipped` says why): plans over frames built with `fromColumns(…, { copy: false })`, and plans that
+   * call `mapElements` unless `{ trustUdfs: true }` asserts the functions are pure. A strict engine request
+   * is served only from an entry that engine produced.
    */
-  persist(): this {
-    this.runtime.persist.mark(this.plan)
+  persist(options?: PersistOptions): this {
+    this.runtime.persist.mark(this.plan, options)
     return this
   }
 
@@ -857,11 +884,27 @@ function schemaFieldsFromPlan(plan: PlanNode): readonly Field[] | null {
   }
 }
 
+/** A row column that holds BigInts, under an Int64Policy: exact numbers, exact decimal strings, or an error. */
+function resolveBigIntColumn(rows: readonly Row[], name: string, policy: Int64Policy, source: string): unknown[] {
+  const out = new Array<unknown>(rows.length)
+  for (let i = 0; i < rows.length; i++) {
+    const v = getRowField(rows[i]! as Record<string, unknown>, name)
+    if (v === null || v === undefined) out[i] = null
+    else if (policy === 'string') out[i] = typeof v === 'bigint' ? v.toString() : String(v)
+    else if (typeof v !== 'bigint') out[i] = v
+    else if (policy === 'number' || isSafeBigInt(v)) out[i] = Number(v)
+    else throw new PrecisionLossError(name, i, v.toString(), source)
+  }
+  return out
+}
+
 export class Series<T = number | string | boolean | null> {
   constructor(
     readonly name: string,
     readonly column: Column,
     readonly numRows: number,
+    /** Runtime of the frame the series came from; frames derived from it (`valueCounts`) stay there. */
+    private readonly runtime: Runtime = getDefaultRuntime(),
   ) {}
 
   get length(): number {
@@ -958,17 +1001,17 @@ export class Series<T = number | string | boolean | null> {
       input: { type: 'scan', table: this.asTable() },
       value,
     })
-    return new Series(this.name, table.columns[0]!, table.numRows)
+    return new Series(this.name, table.columns[0]!, table.numRows, this.runtime)
   }
 
   ffill(): Series<T> {
     const table = executeCpu({ type: 'ffill', input: { type: 'scan', table: this.asTable() } })
-    return new Series(this.name, table.columns[0]!, table.numRows)
+    return new Series(this.name, table.columns[0]!, table.numRows, this.runtime)
   }
 
   bfill(): Series<T> {
     const table = executeCpu({ type: 'bfill', input: { type: 'scan', table: this.asTable() } })
-    return new Series(this.name, table.columns[0]!, table.numRows)
+    return new Series(this.name, table.columns[0]!, table.numRows, this.runtime)
   }
 
   valueCounts(normalize = false): DataFrame<Row> {
@@ -978,7 +1021,7 @@ export class Series<T = number | string | boolean | null> {
       column: this.name,
       normalize,
     })
-    return new DataFrame(table)
+    return new DataFrame(table, this.runtime)
   }
 
   head(n = 5): T[] {
@@ -1145,6 +1188,7 @@ export class DataFrame<S extends Row = Row> {
       lSuffix?: string
       rSuffix?: string
       validate?: '1:1' | '1:m' | 'm:1'
+      runtime?: Runtime
     },
   ): LazyFrame<JoinResult<S, R, How>> {
     return this.lazy().join(other, options)
@@ -1175,7 +1219,7 @@ export class DataFrame<S extends Row = Row> {
   }
   joinAsof<R extends Row>(
     other: LazyFrame<R> | DataFrame<R>,
-    options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest' },
+    options: { leftOn: string; rightOn?: string; strategy?: 'backward' | 'forward' | 'nearest'; runtime?: Runtime },
   ): LazyFrame<JoinResult<S, R, 'left'>> {
     return this.lazy().joinAsof(other, options)
   }
@@ -1233,7 +1277,7 @@ export class DataFrame<S extends Row = Row> {
       column,
       nunique: this.getColumn(column as keyof S & string).nunique(),
     }))
-    return DataFrame.fromRows(rows)
+    return DataFrame.fromRows(rows).withRuntime(this.runtime)
   }
 
   withWindow<N extends string>(
@@ -1317,8 +1361,8 @@ export class DataFrame<S extends Row = Row> {
     return Promise.resolve(this)
   }
 
-  persist(): LazyFrame<S> {
-    return this.lazy().persist()
+  persist(options?: PersistOptions): LazyFrame<S> {
+    return this.lazy().persist(options)
   }
 
   unpersist(): LazyFrame<S> {
@@ -1363,7 +1407,7 @@ export class DataFrame<S extends Row = Row> {
   getColumn<K extends keyof S & string>(name: K): Series<Cell<S[K]>> {
     const idx = this.table.schema.findIndex((f) => f.name === name)
     if (idx < 0) throw new Error(`Unknown column "${name}"`)
-    return new Series(name, this.table.columns[idx]!, this.table.numRows)
+    return new Series(name, this.table.columns[idx]!, this.table.numRows, this.runtime)
   }
 
   /** Alias of {@link getColumn}. */
@@ -1376,7 +1420,12 @@ export class DataFrame<S extends Row = Row> {
    * appearance (a key missing from a row reads as null); dtypes are inferred over the whole column, so a
    * late fractional / out-of-Int32 / string value widens the column instead of being coerced.
    */
-  static fromRows<T extends Row>(rows: readonly T[]): DataFrame<T> {
+  /**
+   * Build a frame from row objects; column dtypes are inferred from every row. BigInt cells follow
+   * `options.int64` (see `Int64Policy`): by default a column of safe BigInts becomes an exact f64 column and a
+   * value beyond ±(2^53 − 1) raises `PrecisionLossError`; `'string'` keeps exact decimal strings.
+   */
+  static fromRows<T extends Row>(rows: readonly T[], options: { int64?: Int64Policy; source?: string } = {}): DataFrame<T> {
     if (rows.length === 0) return new DataFrame<T>(tableFromColumns([]))
     const n = rows.length
     const names = Object.keys(rows[0]!)
@@ -1390,11 +1439,21 @@ export class DataFrame<S extends Row = Row> {
       }
     }
 
+    // BigInt columns resolved once, per column, under the Int64Policy (never a per-value mix of number / text)
+    const overrides = new Map<string, unknown[]>()
+    for (const name of names) {
+      let big = false
+      for (let i = 0; i < n && !big; i++) big = typeof getRowField(rows[i]! as Record<string, unknown>, name) === 'bigint'
+      if (big) overrides.set(name, resolveBigIntColumn(rows, name, options.int64 ?? 'error', options.source ?? 'fromRows'))
+    }
+    const cell = (i: number, name: string): unknown => {
+      const o = overrides.get(name)
+      return o ? o[i] : getRowField(rows[i]! as Record<string, unknown>, name)
+    }
+
     // Infer dtypes from the full column (not a 256-row sample) so late floats/strings
     // cannot be silently coerced into a wrong integer/utf8 layout.
-    const dtypes: DType[] = names.map((name) =>
-      inferDtypeFromValues(n, (i) => getRowField(rows[i]! as Record<string, unknown>, name)),
-    )
+    const dtypes: DType[] = names.map((name) => inferDtypeFromValues(n, (i) => cell(i, name)))
 
     const columns: Column[] = names.map((name, ci) => {
       const dtype = dtypes[ci]!
@@ -1406,7 +1465,7 @@ export class DataFrame<S extends Row = Row> {
         let anyNull = false
         const nullBitmap = new Uint8Array(Math.ceil(n / 8) || 1)
         for (let i = 0; i < n; i++) {
-          const v = getRowField(rows[i]! as Record<string, unknown>, name)
+          const v = cell(i, name)
           if (v === null || v === undefined) {
             anyNull = true
             codes[i] = 0
@@ -1447,7 +1506,7 @@ export class DataFrame<S extends Row = Row> {
       let anyNull = false
       const nullBitmap = new Uint8Array(Math.ceil(n / 8) || 1)
       for (let i = 0; i < n; i++) {
-        const v = getRowField(rows[i]! as Record<string, unknown>, name)
+        const v = cell(i, name)
         if (v === null || v === undefined) {
           anyNull = true
           continue
@@ -1477,7 +1536,20 @@ export class DataFrame<S extends Row = Row> {
       | Uint8Array
       | { codes: Uint32Array; dictionary: string[] }
     >,
-  >(cols: C, options: { copy?: boolean } = {}): DataFrame<InferColumns<C>> {
+  >(
+    cols: C,
+    options: {
+      /**
+       * Default `true`: typed arrays and pre-encoded codes are copied, so the frame is immutable and later
+       * writes to your arrays cannot change it (or a `persist()`ed result derived from it). `false` shares
+       * your buffers zero-copy — faster for very large inputs, but the frame then aliases memory you can still
+       * write to: its plans are never cached by `persist()`, and results depend on what the buffers hold when
+       * `collect()` runs.
+       */
+      copy?: boolean
+    } = {},
+  ): DataFrame<InferColumns<C>> {
+    const copy = options.copy !== false
     const names = Object.keys(cols)
     if (names.length === 0) return new DataFrame<any>(tableFromColumns([]))
     type Input =
@@ -1504,27 +1576,28 @@ export class DataFrame<S extends Row = Row> {
         values.codes instanceof Uint32Array &&
         Array.isArray(values.dictionary)
       ) {
-        return {
+        const column: Column = {
           field: { name, dtype: 'category', nullable: false },
-          data: options.copy ? values.codes.slice() : values.codes,
-          dictionary: options.copy ? values.dictionary.slice() : values.dictionary,
-        } satisfies Column
+          data: copy ? values.codes.slice() : values.codes,
+          dictionary: copy ? values.dictionary.slice() : values.dictionary,
+        }
+        if (!copy) markBorrowedColumn(column)
+        return column
       }
 
-      // Typed buffers are shared, not copied (README → "Buffer ownership"): the frame reads the caller's
-      // array, so a later write to that array changes the frame. Pass { copy: true } to detach.
+      // Typed buffers are copied unless { copy: false } (README → "Buffer ownership"); a shared buffer is
+      // recorded as borrowed so the persist() cache refuses plans over it.
       if (ArrayBuffer.isView(values) && !(values instanceof DataView)) {
-        const typed = (options.copy ? values.slice() : values) as Float64Array | Float32Array | Int32Array | Uint32Array | Uint8Array
+        const typed = (copy ? values.slice() : values) as Float64Array | Float32Array | Int32Array | Uint32Array | Uint8Array
         let dtype: DType = 'f64'
         if (typed instanceof Float32Array) dtype = 'f32'
         else if (typed instanceof Int32Array) dtype = 'i32'
         else if (typed instanceof Uint32Array) dtype = 'u32'
         else if (typed instanceof Uint8Array) dtype = 'bool'
         else dtype = 'f64'
-        return {
-          field: { name, dtype, nullable: false },
-          data: typed,
-        } satisfies Column
+        const column: Column = { field: { name, dtype, nullable: false }, data: typed }
+        if (!copy) markBorrowedColumn(column)
+        return column
       }
 
       const arr = values as Array<number | string | boolean | null | Date>
@@ -1572,9 +1645,9 @@ export class DataFrame<S extends Row = Row> {
 
   static fromJSON<S extends Row = Row>(data: Record<string, unknown>[] | string, options: ReadJsonOptions = {}): DataFrame<S> {
     if (typeof data !== 'string' && options.orient === undefined && !options.lines) {
-      return DataFrame.fromRows(data) as DataFrame<S>
+      return DataFrame.fromRows(data, { int64: options.int64, source: 'fromJSON' }) as DataFrame<S>
     }
-    return DataFrame.fromRows(parseJsonToRows(data, options)) as DataFrame<S>
+    return DataFrame.fromRows(parseJsonToRows(data, options), { int64: options.int64, source: 'fromJSON' }) as DataFrame<S>
   }
 
   /** @deprecated Takes columna's `ArrowLike` JSON, not Apache Arrow. Use `fromArrowIpc()` for real Arrow bytes or `fromArrowLike()`. */
@@ -1592,13 +1665,13 @@ export class DataFrame<S extends Row = Row> {
    * LargeUtf8, Timestamp (any unit), Date32/64, Null and dictionary-encoded strings are accepted; nested,
    * decimal, binary and compressed batches throw with the column name. `S` is an assertion, not verified.
    */
-  static fromArrowIpc<S extends Row = Row>(bytes: Uint8Array | ArrayBuffer): DataFrame<S> {
-    return new DataFrame<any>(fromArrowIpc(bytes))
+  static fromArrowIpc<S extends Row = Row>(bytes: Uint8Array | ArrayBuffer, options: ArrowIpcReadOptions = {}): DataFrame<S> {
+    return new DataFrame<any>(fromArrowIpc(bytes, options))
   }
 
   /** Read Apache Arrow IPC (stream or file / Feather v2) from a path, URL or bytes under the IO policy. */
-  static async readArrowIpc<S extends Row = Row>(source: IoSource, options: IoLoadOptions = {}): Promise<DataFrame<S>> {
-    return new DataFrame<any>(fromArrowIpc(await loadBytes(source, options)))
+  static async readArrowIpc<S extends Row = Row>(source: IoSource, options: IoLoadOptions & ArrowIpcReadOptions = {}): Promise<DataFrame<S>> {
+    return new DataFrame<any>(fromArrowIpc(await loadBytes(source, options), options))
   }
 
   /** Sync parse of an in-memory CSV string (pandas/polars-style options). */
@@ -1630,7 +1703,7 @@ export class DataFrame<S extends Row = Row> {
 
   /** Read JSON / NDJSON from path, URL, string content, or bytes. */
   static async readJson<S extends Row = Row>(source: IoSource, options: ReadJsonOptions = {}): Promise<DataFrame<S>> {
-    return DataFrame.fromRows(await readJsonRows(source, options)) as DataFrame<S>
+    return DataFrame.fromRows(await readJsonRows(source, options), { int64: options.int64, source: 'readJson' }) as DataFrame<S>
   }
 
   /** Read Excel (.xls / .xlsx) from path, URL, or bytes. */
@@ -1640,7 +1713,7 @@ export class DataFrame<S extends Row = Row> {
 
   /** Read Parquet from path, URL, or bytes. */
   static async readParquet<S extends Row = Row>(source: IoSource, options: ReadParquetOptions = {}): Promise<DataFrame<S>> {
-    return DataFrame.fromRows(await readParquetRows(source, options)) as DataFrame<S>
+    return DataFrame.fromRows(await readParquetRows(source, options), { int64: options.int64, source: 'readParquet' }) as DataFrame<S>
   }
 
   /**
@@ -1654,7 +1727,7 @@ export class DataFrame<S extends Row = Row> {
     connection: SqlConnection,
     options: ReadSqlOptions = {},
   ): Promise<DataFrame> {
-    return DataFrame.fromRows(await readDatabaseRows(sql, connection, options))
+    return DataFrame.fromRows(await readDatabaseRows(sql, connection, options), { int64: options.int64, source: 'readSql' })
   }
 
   /** Alias of `readSql`. */

@@ -28,6 +28,7 @@ import {
   TimestampNanosecond,
   Uint16,
   Uint32,
+  Uint64,
   Utf8,
   makeData,
   makeVector,
@@ -35,7 +36,7 @@ import {
   tableToIPC,
   vectorFromArray,
 } from 'apache-arrow'
-import { DataFrame } from '@columna/core'
+import { DataFrame, PrecisionLossError } from '@columna/core'
 
 const rows = [
   { f: 1.5, i: -3, u: 7, b: true, s: 'alpha', c: 'x', d: Date.UTC(2024, 0, 1) },
@@ -293,4 +294,60 @@ describe('seeded random frames through apache-arrow and back', () => {
       expect(back.dtypes).toEqual(df.dtypes)
     })
   }
+})
+
+describe('Int64 / UInt64 boundary values (apache-arrow writer → fromArrowIpc)', () => {
+  const B = { p31: 2n ** 31n, p32: 2n ** 32n, safeMax: 2n ** 53n - 1n, p53: 2n ** 53n, p53p1: 2n ** 53n + 1n, i64max: 2n ** 63n - 1n, i64min: -(2n ** 63n), u64max: 2n ** 64n - 1n }
+  const ipc = (name: string, values: Array<bigint | null>, type: Int64 | Uint64) => tableToIPC(new Table({ [name]: vectorFromArray(values, type) }))
+
+  it('values within ±(2^53 − 1) — including 2^31, 2^32 and the extremes — read as an exact f64 column', () => {
+    const df = DataFrame.fromArrowIpc(ipc('a', [B.p31, B.p32, B.safeMax, -B.safeMax, null], new Int64()))
+    expect(df.dtypes.a).toBe('f64')
+    expect(df.getColumn('a').toArray()).toEqual([2 ** 31, 2 ** 32, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER, null])
+    const u = DataFrame.fromArrowIpc(ipc('u', [0n, B.p32, B.safeMax], new Uint64()))
+    expect(u.getColumn('u').toArray()).toEqual([0, 2 ** 32, Number.MAX_SAFE_INTEGER])
+  })
+
+  const unsafe: Array<[string, bigint, Int64 | Uint64]> = [
+    ['2^53', B.p53, new Int64()],
+    ['2^53 + 1', B.p53p1, new Int64()],
+    ['INT64_MAX', B.i64max, new Int64()],
+    ['INT64_MIN', B.i64min, new Int64()],
+    ['UINT64_MAX', B.u64max, new Uint64()],
+  ]
+  for (const [label, v, type] of unsafe) {
+    it(`${label}: PrecisionLossError by default (column, row, exact value); 'string' exact; 'number' explicit nearest double`, () => {
+      const bytes = ipc('id', [1n, v, null], type)
+      expect(() => DataFrame.fromArrowIpc(bytes)).toThrow(PrecisionLossError)
+      try {
+        DataFrame.fromArrowIpc(bytes)
+      } catch (e) {
+        expect(e).toMatchObject({ column: 'id', row: 1, value: v.toString() })
+      }
+      expect(DataFrame.fromArrowIpc(bytes, { int64: 'string' }).getColumn('id').toArray()).toEqual(['1', v.toString(), null])
+      expect(DataFrame.fromArrowIpc(bytes, { int64: 'number' }).getColumn('id').toArray()).toEqual([1, Number(v), null])
+    })
+  }
+
+  it('the row index of the error counts across record batches', () => {
+    const a = new Table({ id: vectorFromArray([1n, 2n], new Int64()) })
+    const b = new Table({ id: vectorFromArray([3n, B.p53p1], new Int64()) })
+    try {
+      DataFrame.fromArrowIpc(tableToIPC(a.concat(b)))
+      expect.unreachable()
+    } catch (e) {
+      expect(e).toMatchObject({ row: 3 })
+    }
+  })
+
+  it('nanosecond timestamps beyond 2^53 ns convert to ms without rounding the integer part first', () => {
+    // 2023-11-14T22:13:20.123456789Z in ns = 1_700_000_000_123_456_789 (> 2^53)
+    const ns = 1_700_000_000_123_456_789n
+    const t = makeVector(makeData({ type: new TimestampNanosecond(), data: BigInt64Array.from([ns, -1n]) }))
+    const df = DataFrame.fromArrowIpc(tableToIPC(new Table({ t })))
+    const [ms, neg] = df.getColumn('t').toArray() as number[]
+    expect(Math.abs(ms! - 1_700_000_000_123.456789)).toBeLessThan(1e-3) // exact to the double's resolution (~0.2 µs)
+    expect(Math.floor(ms!)).toBe(1_700_000_000_123)
+    expect(neg).toBe(-1e-6)
+  })
 })

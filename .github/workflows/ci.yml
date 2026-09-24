@@ -15,8 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 is EOL and has no duckdb prebuilds (bench would compile from source for ~20+ min).
-        node-version: [20, 22]
+        # Node 18 stays in the matrix while engines says >=18. The 20+ min installs it once caused came from
+        # compiling bench-only natives (duckdb has no Node 18 prebuild); those are neverBuiltDependencies now.
+        node-version: [18, 20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

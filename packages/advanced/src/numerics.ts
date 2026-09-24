@@ -90,14 +90,17 @@ export function maxOf(x: ArrayLike<number>): number {
   return m
 }
 
-export function trapz(y: ArrayLike<number>, x?: ArrayLike<number>): number {
+/** Trapezoidal rule (`scipy.integrate.trapezoid`): `x` = sample positions (same length as `y`) or spacing `dx` (default 1). */
+export function trapz(y: ArrayLike<number>, x?: ArrayLike<number> | number): number {
   const n = y.length
   if (n < 2) return 0
   let s = 0
-  if (!x) {
+  if (x === undefined || typeof x === 'number') {
+    const dx = x ?? 1
     for (let i = 1; i < n; i++) s += 0.5 * (Number(y[i - 1]) + Number(y[i]))
-    return s
+    return s * dx
   }
+  if (x.length !== n) throw new RangeError(`trapz: x has ${x.length} samples, y has ${n}`)
   for (let i = 1; i < n; i++) {
     const dx = Number(x[i]) - Number(x[i - 1])
     s += 0.5 * (Number(y[i - 1]) + Number(y[i])) * dx
@@ -105,19 +108,62 @@ export function trapz(y: ArrayLike<number>, x?: ArrayLike<number>): number {
   return s
 }
 
-/** Composite Simpson rule (even n-1 preferred; falls back with trap on last). */
-export function simpson(y: ArrayLike<number>, x?: ArrayLike<number>): number {
+/**
+ * Composite Simpson's rule — the same algorithm as `scipy.integrate.simpson` (SciPy ≥ 1.11).
+ *
+ * `x` is either sample positions (same length as `y`, strictly monotonic — decreasing integrates with the
+ * sign of the direction, as in SciPy) or a uniform spacing `dx` (default 1).
+ *
+ * - Odd number of samples (even number of intervals): every pair of intervals `[x₀, x₁, x₂]` is integrated
+ *   by the parabola through its three points, with the weights for unequal widths `h₀, h₁`:
+ *   `(h₀+h₁)/6 · [ (2 − h₁/h₀)·y₀ + (h₀+h₁)²/(h₀h₁)·y₁ + (2 − h₀/h₁)·y₂ ]`. Exact for cubics on any grid.
+ * - Even number of samples: Simpson over the first N − 1 samples plus Cartwright's correction for the last
+ *   interval (the parabola through the last three points integrated over the last interval only):
+ *   `α·y_{N−1} + β·y_{N−2} − η·y_{N−3}` with `α = (2h₁² + 3h₀h₁)/(6(h₀+h₁))`, `β = (h₁² + 3h₀h₁)/(6h₀)`,
+ *   `η = h₁³/(6h₀(h₀+h₁))`. Exact for quadratics.
+ * - Two samples: the trapezoid (the only rule two points define). Fewer: 0.
+ */
+export function simpson(y: ArrayLike<number>, x?: ArrayLike<number> | number): number {
   const n = y.length
   if (n < 2) return 0
-  if (!x) {
-    if (n % 2 === 0) {
-      // odd number of intervals — simpson on n-1 then trap last
-      return simpson(Array.from({ length: n - 1 }, (_, i) => Number(y[i]))) + 0.5 * (Number(y[n - 2]) + Number(y[n - 1]))
+  const ys = new Float64Array(n)
+  for (let i = 0; i < n; i++) ys[i] = Number(y[i])
+  let xs: Float64Array | null = null
+  let dx = 1
+  if (typeof x === 'number') {
+    if (!Number.isFinite(x) || x === 0) throw new RangeError(`simpson: dx must be finite and non-zero (got ${x})`)
+    dx = x
+  } else if (x !== undefined) {
+    if (x.length !== n) throw new RangeError(`simpson: x has ${x.length} samples, y has ${n}`)
+    xs = new Float64Array(n)
+    for (let i = 0; i < n; i++) xs[i] = Number(x[i])
+    const dir = Math.sign(xs[1]! - xs[0]!)
+    for (let i = 1; i < n; i++) {
+      const d = xs[i]! - xs[i - 1]!
+      if (!Number.isFinite(d) || Math.sign(d) !== dir || d === 0) {
+        throw new RangeError('simpson: x must be finite and strictly monotonic (a repeated or reversed sample makes an interval of width ≤ 0)')
+      }
     }
-    let s = Number(y[0]) + Number(y[n - 1])
-    for (let i = 1; i < n - 1; i++) s += (i % 2 === 0 ? 2 : 4) * Number(y[i])
-    return s / 3
   }
-  // uneven spacing: pairwise parabolic / trap fallback
-  return trapz(y, x)
+  const h = (i: number): number => (xs ? xs[i + 1]! - xs[i]! : dx)
+  if (n === 2) return 0.5 * h(0) * (ys[0]! + ys[1]!)
+
+  // pairs of intervals over samples [0, last]
+  const pairs = (last: number): number => {
+    let s = 0
+    for (let i = 0; i + 2 <= last; i += 2) {
+      const h0 = h(i)
+      const h1 = h(i + 1)
+      const hsum = h0 + h1
+      s += (hsum / 6) * ((2 - h1 / h0) * ys[i]! + ((hsum * hsum) / (h0 * h1)) * ys[i + 1]! + (2 - h0 / h1) * ys[i + 2]!)
+    }
+    return s
+  }
+  if (n % 2 === 1) return pairs(n - 1)
+  const h0 = h(n - 3)
+  const h1 = h(n - 2)
+  const alpha = (2 * h1 * h1 + 3 * h0 * h1) / (6 * (h0 + h1))
+  const beta = (h1 * h1 + 3 * h0 * h1) / (6 * h0)
+  const eta = (h1 * h1 * h1) / (6 * h0 * (h0 + h1))
+  return pairs(n - 2) + alpha * ys[n - 1]! + beta * ys[n - 2]! - eta * ys[n - 3]!
 }

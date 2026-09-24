@@ -39,8 +39,9 @@ describe('every row constructor treats "__proto__" as a column name', () => {
   it('Parquet: normalizeParquetRow', () => {
     const row = normalizeParquetRow({ ...hostile(), big: 12n, huge: 2n ** 60n })
     assertOrdinaryField(row, { polluted: true })
-    expect(row.big).toBe(12)
-    expect(row.huge).toBe(String(2n ** 60n))
+    // BigInts are kept as-is here; DataFrame.fromRows resolves them per column (tests/int64-precision.test.ts)
+    expect(row.big).toBe(12n)
+    expect(row.huge).toBe(2n ** 60n)
   })
 
   it('Kafka: flattened payload keys and header names', () => {

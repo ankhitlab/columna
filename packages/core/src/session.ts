@@ -17,7 +17,7 @@
  * ```
  */
 import { PersistCache, Runtime, getDefaultRuntime, type Backend, type RuntimeOptions, type PersistCacheOptions } from '@columna/runtime'
-import type { ArrowLike } from '@columna/arrow'
+import type { ArrowIpcReadOptions, ArrowLike } from '@columna/arrow'
 import { DataFrame, LazyFrame, type InferColumns, type Row } from './dataframe.js'
 import type {
   IoLoadOptions,
@@ -93,8 +93,8 @@ export class Session {
     return this.bind(DataFrame.fromJSON<S>(data, options))
   }
 
-  fromArrowIpc<S extends Row = Row>(bytes: Uint8Array | ArrayBuffer): DataFrame<S> {
-    return this.bind(DataFrame.fromArrowIpc<S>(bytes))
+  fromArrowIpc<S extends Row = Row>(bytes: Uint8Array | ArrayBuffer, options?: ArrowIpcReadOptions): DataFrame<S> {
+    return this.bind(DataFrame.fromArrowIpc<S>(bytes, options))
   }
 
   fromArrowLike<S extends Row = Row>(arrow: ArrowLike): DataFrame<S> {
@@ -119,7 +119,7 @@ export class Session {
     return this.bind(await DataFrame.readParquet<S>(source, this.ioOptions(options)))
   }
 
-  async readArrowIpc<S extends Row = Row>(source: IoSource, options: IoLoadOptions = {}): Promise<DataFrame<S>> {
+  async readArrowIpc<S extends Row = Row>(source: IoSource, options: IoLoadOptions & ArrowIpcReadOptions = {}): Promise<DataFrame<S>> {
     return this.bind(await DataFrame.readArrowIpc<S>(source, this.ioOptions(options)))
   }
 

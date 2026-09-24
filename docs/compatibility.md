@@ -65,6 +65,11 @@ deprecations: `toArrow()` / `fromArrow()` (→ `toArrowLike()` / `fromArrowLike(
 
 ## Results and numerics
 
+**64-bit integers are exact or refused.** Without an i64 dtype, a 64-bit column is an f64 column only when every
+value is within ±(2^53 − 1); otherwise readers raise `PrecisionLossError` unless `int64: 'string'` (exact) or
+`int64: 'number'` (declared lossy) is chosen. This default is Tier 1: no future version reads a 64-bit value as
+a different number without that explicit opt-in.
+
 Statistical results are compared against scipy / numpy / NIST / Minitab conventions in the test suite; a fix that
 changes a result (as the Poisson tail and beta quantile fixes did) is a *Fixed* entry that names the affected
 inputs and the size of the change. Dtype inference rules (`fromRows` full-column inference, widening instead of
@@ -76,7 +81,7 @@ tests; WebGPU is bit-exact for integer kernels and refuses f64 unless `gpuLossyF
 
 | Environment | Status |
 |---|---|
-| Node.js 18, 20, 22 | Tested in CI on Linux (and 22 on Windows). A Node line leaves the matrix in a minor release, announced one minor ahead. |
+| Node.js 18, 20, 22 | Tested in CI on Linux (and 22 on Windows): lint, build, typecheck, the test suite and the Arrow interop suite. Node 18 is past its upstream end of life; it stays supported while `engines` says `>=18`, and leaving it is a minor-release change announced one minor ahead. On 18 the `node:sqlite` test is skipped (the module does not exist there); `process.getBuiltinModule` / `AbortSignal.any` have fallbacks. |
 | Node.js 24 | Used in development; not yet in the CI matrix. |
 | Chromium (headless, current stable) | Built bundle tested in CI, including the DuckDB-Wasm Arrow exchange and — where an adapter exists — WebGPU. |
 | Firefox, Safari | Best effort: the CPU path has no browser-specific code; WebGPU and `SharedArrayBuffer` workers depend on the browser's support and on COOP/COEP. |

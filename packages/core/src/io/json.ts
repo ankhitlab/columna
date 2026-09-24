@@ -1,5 +1,6 @@
 import { setRowField } from '@columna/arrow'
 import type { ReadJsonOptions } from './types.js'
+import { parseJsonExact } from './json-exact.js'
 
 function takeSlice<T>(arr: T[], skipRows: number, nRows?: number): T[] {
   const start = Math.max(0, skipRows)
@@ -18,11 +19,11 @@ export function parseJsonToRows(data: unknown, options: ReadJsonOptions = {}): R
       const parsed: Record<string, unknown>[] = []
       for (const line of data.replace(/^\uFEFF/, '').split(/\r?\n/)) {
         if (!line.trim()) continue
-        parsed.push(JSON.parse(line) as Record<string, unknown>)
+        parsed.push(parseJsonExact(line) as Record<string, unknown>)
       }
       return takeSlice(parsed, skipRows, options.nRows)
     }
-    data = JSON.parse(data)
+    data = parseJsonExact(data)
   }
 
   if (orient === 'records') {

@@ -70,7 +70,14 @@ Node flags still matter: the budget is *columna's* estimate of *its* tables, not
 `--max-old-space-size` sized for budget + application + headroom, and watch RSS, not only the report.
 
 `persist()` caches are LRU-capped by `maxCacheBytes` (process) or `persist: { maxBytes }` (session); an entry is
-evicted whole. Cached tables count toward RSS, not toward the execution budget.
+evicted whole. Cached tables count toward RSS, not toward the execution budget. The cache's own bookkeeping is
+bounded too: `maxEntries` (default 256), `maxPending` (default 1024 marks of plans not yet collected), optional
+`ttlMs` / `pendingTtlMs`; watch `cache.stats()` (`hits`, `misses`, `evictions`, `pendingEvictions`, `expired`,
+`skipped`, `strictBypasses`).
+
+What the cache will not do: serve a plan over zero-copy frames (`fromColumns(…, { copy: false })`), serve a plan
+that calls `mapElements` unless `persist({ trustUdfs: true })`, or answer a strict engine request with a table
+another engine produced — the report's `cacheSkipped` / `cachedFrom` fields say which case applied.
 
 ## 5. Spill directory
 

@@ -395,11 +395,27 @@ Pick a different tool for those, or model them as text.
 
 ### Buffer ownership
 
-`fromColumns` **shares** typed arrays and pre-encoded category codes zero-copy: the frame reads your buffer, so writing
-to it later changes the frame, and a `readonly TableView` does not freeze its contents. Pass `{ copy: true }` to detach.
-Everything the library produces (operations, readers) is owned by the library and never aliases user memory. The GPU
-buffer cache is keyed by array identity: a buffer mutated after its first upload is *not* re-uploaded — treat shared
-buffers as immutable once handed over, or copy.
+A DataFrame is immutable. `fromColumns` **copies** typed arrays and pre-encoded category codes by default, so writing to
+your arrays later changes neither the frame nor anything `persist()` cached from it. `{ copy: false }` shares them
+zero-copy for very large inputs: the frame then aliases memory you can still write to, results depend on what the
+buffers hold when `collect()` runs, and `persist()` refuses such plans (the execution report's `cacheSkipped` says
+why — also for plans calling `mapElements` without `persist({ trustUdfs: true })`). Everything the library produces
+(operations, readers) is owned by the library and never aliases user memory. The GPU buffer cache is keyed by array
+identity: a zero-copy buffer mutated after its first upload is *not* re-uploaded.
+
+### 64-bit integers
+
+columna has no i64 dtype, and no reader rounds silently. Arrow Int64 / UInt64, Parquet INT64, JSON integer literals,
+driver BigInts and BigInt row values all follow `int64` (an `Int64Policy`): a column whose values are all within
+±(2^53 − 1) is an exact f64 column; otherwise the read throws `PrecisionLossError` (column, row, exact value) unless you
+choose `int64: 'string'` (exact decimal strings — the right choice for IDs and join keys) or `int64: 'number'`
+(explicitly accept the nearest double). `JSON.parse` would round `9007199254740993` to `…992`; `readJson` does not.
+
+### Frames of several sessions
+
+Operators that take several frames (`LazyFrame.concat`, `join` and its variants, `joinAsof`) run on the inputs'
+runtime: frames of one session stay on it, unbound frames (built without a session) adopt it, and frames of two
+different sessions throw `RuntimeMismatchError` unless `{ runtime }` says which one executes the result.
 
 ### Importing has no side effects
 

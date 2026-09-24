@@ -49,6 +49,8 @@ export type SqlConnectionConfig = {
 export type SqlConnection = string | SqlConnectionConfig | SqlClient
 
 export type ReadSqlOptions = {
+  /** Driver BigInts (int8 / bigint columns): `'error'` (default) `| 'string' | 'number'` — see `Int64Policy`. */
+  int64?: import('@columna/arrow').Int64Policy
   /** Query parameters (positional array or named object, dialect-dependent). */
   params?: SqlParams
   /** Force dialect when it cannot be inferred from the URL. */

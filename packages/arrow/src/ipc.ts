@@ -16,7 +16,18 @@
  * any index width. Nested, decimal, binary, interval
  * and compressed batches are refused with the field name in the error rather than decoded wrongly.
  */
-import { isValid, setValid, tableFromColumns, type Column, type DType, type Field, type TableView } from './index.js'
+import {
+  PrecisionLossError,
+  isSafeBigInt,
+  isValid,
+  setValid,
+  tableFromColumns,
+  type Column,
+  type DType,
+  type Field,
+  type Int64Policy,
+  type TableView,
+} from './index.js'
 
 // ───────────────────────────── FlatBuffers builder (back-to-front, as flatbuffers.Builder) ─────────────────────────────
 
@@ -697,11 +708,47 @@ function readInts(bytes: Uint8Array, bits: number, signed: boolean, n: number): 
     return { data: new Uint32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + n * 4)), dtype: 'u32' }
   }
   if (bits === 64) {
+    // dictionary indices only (a dictionary cannot have 2^53 entries); value columns go through readInt64Column
     const out = new Float64Array(n)
     for (let i = 0; i < n; i++) out[i] = Number(signed ? dv.getBigInt64(i * 8, true) : dv.getBigUint64(i * 8, true))
     return { data: out, dtype: 'f64' }
   }
   throw new Error(`fromArrowIpc: unsupported integer width ${bits}`)
+}
+
+/** Int64 / UInt64 value column under the reader's Int64Policy — never a silently rounded value. */
+function readInt64Column(
+  bytes: Uint8Array,
+  signed: boolean,
+  n: number,
+  nullBitmap: Uint8Array | undefined,
+  column: string,
+  policy: Int64Policy,
+  rowBase: number,
+): { data: Float64Array | string[]; dtype: DType } {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const at = (i: number): bigint => (signed ? dv.getBigInt64(i * 8, true) : dv.getBigUint64(i * 8, true))
+  if (policy === 'string') {
+    const out = new Array<string>(n)
+    for (let i = 0; i < n; i++) out[i] = isValid(nullBitmap, i) ? at(i).toString() : ''
+    return { data: out, dtype: 'utf8' }
+  }
+  const out = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    if (!isValid(nullBitmap, i)) continue
+    const v = at(i)
+    if (policy === 'error' && !isSafeBigInt(v)) throw new PrecisionLossError(column, rowBase + i, v.toString(), 'fromArrowIpc')
+    out[i] = Number(v)
+  }
+  return { data: out, dtype: 'f64' }
+}
+
+/** Epoch value in `unitsPerMs` units (BigInt) → milliseconds as a double, without rounding the integer part first. */
+function toEpochMs(v: bigint, unitsPerMs: bigint): number {
+  if (unitsPerMs === 1n) return Number(v)
+  const q = v / unitsPerMs
+  const r = v % unitsPerMs
+  return Number(q) + Number(r) / Number(unitsPerMs)
 }
 
 function halfToFloat(h: number): number {
@@ -764,6 +811,7 @@ function decodeField(
   buffers: Array<[number, number]>,
   body: Uint8Array,
   variadic: number[] = [],
+  opts: { int64: Int64Policy; rowBase: number } = { int64: 'error', rowBase: 0 },
 ): DecodedColumn {
   if (field.hasChildren) throw unsupported(field, 'nested columns are not supported')
   const node = nodes[cur.node++]
@@ -788,6 +836,10 @@ function decodeField(
   }
   switch (t) {
     case ArrowType.Int: {
+      if (field.a === 64) {
+        const r = readInt64Column(buf(), field.b !== 0, n, nullBitmap, field.name, opts.int64, opts.rowBase)
+        return { dtype: r.dtype, data: r.data, nullBitmap }
+      }
       const r = readInts(buf(), field.a, field.b !== 0, n)
       return { dtype: r.dtype, data: r.data, nullBitmap }
     }
@@ -827,9 +879,21 @@ function decodeField(
       if (t === ArrowType.Date && field.a === 0) {
         for (let i = 0; i < n; i++) out[i] = dv.getInt32(i * 4, true) * 86_400_000
       } else {
-        // Timestamp: SECOND=0, MILLISECOND=1, MICROSECOND=2, NANOSECOND=3; Date64 is milliseconds
-        const scale = t === ArrowType.Date ? 1 : [1000, 1, 1e-3, 1e-6][field.a] ?? 1
-        for (let i = 0; i < n; i++) out[i] = Number(dv.getBigInt64(i * 8, true)) * scale
+        // Timestamp: SECOND=0, MILLISECOND=1, MICROSECOND=2, NANOSECOND=3; Date64 is milliseconds.
+        // Converted exactly in BigInt (ns epoch values exceed 2^53); the ms double keeps ~0.1 µs today.
+        const unit = t === ArrowType.Date ? 1 : field.a
+        for (let i = 0; i < n; i++) {
+          if (!isValid(nullBitmap, i)) continue
+          const v = dv.getBigInt64(i * 8, true)
+          if (unit === 0) {
+            if (!isSafeBigInt(v * 1000n)) throw new PrecisionLossError(field.name, opts.rowBase + i, `${v} s`, 'fromArrowIpc')
+            out[i] = Number(v) * 1000
+          } else {
+            const perMs = unit === 1 ? 1n : unit === 2 ? 1000n : 1_000_000n
+            if (!isSafeBigInt(v / perMs)) throw new PrecisionLossError(field.name, opts.rowBase + i, `${v}`, 'fromArrowIpc')
+            out[i] = toEpochMs(v, perMs)
+          }
+        }
       }
       return { dtype: 'datetime', data: out, nullBitmap }
     }
@@ -880,7 +944,13 @@ function concatDecoded(dtype: DType, parts: DecodedColumn[], total: number): { d
  * concatenated; dictionary deltas are applied. Big-endian, nested, compressed and exotic types throw with the
  * column name — nothing is silently coerced.
  */
-export function fromArrowIpc(input: Uint8Array | ArrayBuffer): TableView {
+export interface ArrowIpcReadOptions {
+  /** Int64 / UInt64 columns: `'error'` (default) `| 'string' | 'number'` — see {@link Int64Policy}. */
+  int64?: Int64Policy
+}
+
+export function fromArrowIpc(input: Uint8Array | ArrayBuffer, options: ArrowIpcReadOptions = {}): TableView {
+  const int64: Int64Policy = options.int64 ?? 'error'
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input)
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const isFile = bytes.length >= 8 && new TextDecoder().decode(bytes.subarray(0, 6)) === FILE_MAGIC
@@ -935,7 +1005,7 @@ export function fromArrowIpc(input: Uint8Array | ArrayBuffer): TableView {
       if (!fields) throw new Error('fromArrowIpc: record batch before schema')
       const rb = parseRecordBatch(dv, header)
       const cur = { node: 0, buffer: 0, variadic: 0 }
-      const cols = fields.map((f) => decodeField(f, cur, rb.nodes, rb.buffers, body, rb.variadic))
+      const cols = fields.map((f) => decodeField(f, cur, rb.nodes, rb.buffers, body, rb.variadic, { int64, rowBase: totalRows }))
       batches.push(cols)
       totalRows += rb.length
     }

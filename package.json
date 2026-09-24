@@ -56,7 +56,8 @@
   "pnpm": {
     "neverBuiltDependencies": [
       "duckdb",
-      "nodejs-polars"
+      "nodejs-polars",
+      "better-sqlite3"
     ]
   }
 }

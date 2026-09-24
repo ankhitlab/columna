@@ -28,7 +28,8 @@ export { openSqlClient, setIoPolicy, getIoPolicy, io } from './io/index.js'
 export type { IoPolicy, IoLoadOptions, IoSourceMode } from './io/types.js'
 export type { CsvWriteOptions } from './io/write.js'
 export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
-export { toArrowIpc, fromArrowIpc } from '@columna/arrow'
+export { toArrowIpc, fromArrowIpc, PrecisionLossError } from '@columna/arrow'
+export type { ArrowIpcReadOptions, Int64Policy } from '@columna/arrow'
 export type { AggKind, CorrMethod, EngineKind, ExecuteOptions, ExecutionEvent, ExecutionReport, JoinKind, MathOp, MemoryPolicy, PlanNode, QuantileMethod, RankMethod } from '@columna/runtime'
 export {
   EngineStrictError,
@@ -43,5 +44,8 @@ export {
   Runtime,
   getDefaultRuntime,
   setDefaultRuntime,
+  RuntimeMismatchError,
+  resolveRuntime,
+  isProcessDefaultRuntime,
 } from '@columna/runtime'
 export type { PersistCacheOptions, RuntimeOptions } from '@columna/runtime'

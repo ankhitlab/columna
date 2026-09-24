@@ -32,14 +32,12 @@ export async function parseParquetToRows(
   return (rows as Record<string, unknown>[]).map(normalizeParquetRow)
 }
 
-/** BigInt → number when safe (else decimal string); column names are data, never prototype keys. */
+/**
+ * Column names are data, never prototype keys. INT64 values stay BigInt here: `DataFrame.fromRows` applies the
+ * reader's Int64Policy per column (exact f64, exact strings, or an error — never a per-value mix).
+ */
 export function normalizeParquetRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(row)) {
-    if (typeof v === 'bigint') {
-      const n = Number(v)
-      setRowField(out, k, Number.isSafeInteger(n) ? n : v.toString())
-    } else setRowField(out, k, v)
-  }
+  for (const [k, v] of Object.entries(row)) setRowField(out, k, v)
   return out
 }

@@ -111,10 +111,8 @@ export async function readSqlRows(
 function normalizeSqlRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(row)) {
-    if (typeof v === 'bigint') {
-      const n = Number(v)
-      setRowField(out, k, Number.isSafeInteger(n) ? n : v.toString())
-    } else if (v instanceof Date) {
+    // BigInts stay BigInt: DataFrame.readSql applies the Int64Policy per column
+    if (v instanceof Date) {
       setRowField(out, k, v.getTime())
     } else {
       setRowField(out, k, v)

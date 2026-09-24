@@ -91,7 +91,9 @@ The cheat-sheet; the long form with worked examples is [pandas-to-columna.md](pa
 ## Things that have no equivalent — plan for them
 
 - **No SQL.** DuckDB-Wasm next to columna, exchanging Arrow IPC, is the intended pairing.
-- **No i64 / decimal / nested types.** Int64 columns arrive as f64 (exact to 2⁵³); lists and structs are refused.
+- **No i64 / decimal / nested types.** Int64 columns arrive as exact f64 when every value is within ±(2⁵³ − 1),
+  otherwise the read fails unless `{ int64: 'string' }` (exact decimal strings) or `{ int64: 'number' }` is set;
+  lists and structs are refused.
 - **No mutable frames, no index.** Positional rows; keys are columns.
 - **Cancellation is per operator.** `collect({ signal })` lands between operators, not inside a kernel.
 - **Browser has no disk spill.** Memory budgets spill only on Node.

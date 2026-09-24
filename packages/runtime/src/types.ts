@@ -296,8 +296,15 @@ export interface ExecutionReport {
   spilledBytes?: number
   /** Peak estimated live table bytes observed during this execution. */
   peakBytes?: number
-  /** True when `persist()` served the result from the LRU cache. */
+  /**
+   * True when `persist()` served the result from the LRU cache. `dispatched` / `backendsUsed` then describe the
+   * execution that produced the cached table (also in `cachedFrom`) — nothing executed during this call.
+   */
   cacheHit?: boolean
+  /** On a cache hit: the request and engines of the execution that produced the cached table. */
+  cachedFrom?: { requested: EngineKind; dispatched: EngineKind; strict: boolean; backendsUsed: EngineKind[] }
+  /** The plan was persist()-marked but not cacheable (caller-owned buffers, an untrusted UDF); why. */
+  cacheSkipped?: string
 }
 
 /** Per-execution context handed to backends: records events; `strict` forbids silent delegation. */

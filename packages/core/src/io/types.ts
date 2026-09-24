@@ -1,3 +1,4 @@
+import type { Int64Policy } from '@columna/arrow'
 import type { DType } from '@columna/arrow'
 
 /**
@@ -112,6 +113,11 @@ export type ReadCsvOptions = IoLoadOptions & {
 }
 
 export type ReadJsonOptions = IoLoadOptions & {
+  /**
+   * Integer literals beyond ±(2^53 − 1) (JSON.parse would round them silently): `'error'` (default) throws
+   * `PrecisionLossError`, `'string'` keeps the column as exact decimal strings, `'number'` accepts the nearest double.
+   */
+  int64?: Int64Policy
   /** `records` = array of objects (default); `columns` = {col: values[]}; `lines` = NDJSON. */
   orient?: 'records' | 'columns' | 'values' | 'lines'
   /** Read newline-delimited JSON (NDJSON). Alias of orient:'lines'. */
@@ -138,6 +144,8 @@ export type ReadExcelOptions = IoLoadOptions & {
 }
 
 export type ReadParquetOptions = IoLoadOptions & {
+  /** INT64 / UINT64 columns: `'error'` (default) `| 'string' | 'number'` — see `Int64Policy`. */
+  int64?: Int64Policy
   /** Column subset by name. */
   columns?: string[]
   /** Inclusive start row (0-based). */

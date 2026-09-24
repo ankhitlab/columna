@@ -29,7 +29,8 @@ export type {
   SqlParams,
 } from '@columna/core'
 export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
-export { toArrowIpc, fromArrowIpc } from '@columna/arrow'
+export { toArrowIpc, fromArrowIpc, PrecisionLossError } from '@columna/arrow'
+export type { ArrowIpcReadOptions, Int64Policy } from '@columna/arrow'
 export type { AggKind, CorrMethod, EngineKind, ExecuteOptions, ExecutionEvent, ExecutionReport, JoinKind, MathOp, PlanNode, RankMethod } from '@columna/runtime'
 export { Session, createSession, type SessionOptions } from '@columna/core'
 export {
@@ -42,6 +43,9 @@ export {
   Runtime,
   getDefaultRuntime,
   setDefaultRuntime,
+  RuntimeMismatchError,
+  resolveRuntime,
+  isProcessDefaultRuntime,
   CpuBackend,
   executeCpu,
   optimizePlan,

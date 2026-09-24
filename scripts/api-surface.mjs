@@ -9,13 +9,37 @@
  * public classes. Removing or renaming a recorded name is a breaking change and must be a deliberate edit of
  * the snapshot in the same commit as the CHANGELOG entry. Additions never fail the check.
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const dist = resolve(root, 'packages/columna/dist')
 const out = resolve(root, 'docs/api-surface.json')
+
+/**
+ * TypeScript `private` / `protected` members are ordinary properties at runtime; they are not public API. Read
+ * them from the class bodies in the published packages' sources so the snapshot never records them.
+ */
+function nonPublicMembers(className) {
+  const out = new Set()
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = resolve(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (e.name.endsWith('.ts') && !e.name.endsWith('.d.ts')) {
+        const text = readFileSync(p, 'utf8').replace(/\r/g, '')
+        const start = text.search(new RegExp('\\bexport (?:abstract )?class ' + className + '\\b'))
+        if (start < 0) continue
+        const end = text.indexOf('\n}\n', start)
+        const body = text.slice(start, end < 0 ? text.length : end)
+        for (const m of body.matchAll(/^\s+(?:private|protected)\s+(?:static\s+)?(?:readonly\s+)?(?:async\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)/gm)) out.add(m[1])
+      }
+    }
+  }
+  for (const pkg of ['arrow', 'runtime', 'core', 'advanced', 'columna']) walk(resolve(root, 'packages', pkg, 'src'))
+  return out
+}
 
 export async function collectSurface(load = (entry) => import(pathToFileURL(resolve(dist, entry + '.js')).href)) {
   const surface = { entries: {}, classes: {} }
@@ -29,7 +53,11 @@ export async function collectSurface(load = (entry) => import(pathToFileURL(reso
   for (const name of ['DataFrame', 'LazyFrame', 'GroupBy', 'Series', 'Expr', 'Session', 'Runtime', 'PersistCache']) {
     const cls = main[name]
     if (typeof cls !== 'function') continue
-    const members = (o) => Object.getOwnPropertyNames(o).filter((n) => !['constructor', 'length', 'name', 'prototype'].includes(n) && !n.startsWith('__') && !n.startsWith('_'))
+    const hidden = nonPublicMembers(name)
+    const members = (o) =>
+      Object.getOwnPropertyNames(o).filter(
+        (n) => !['constructor', 'length', 'name', 'prototype'].includes(n) && !n.startsWith('_') && !hidden.has(n),
+      )
     surface.classes[name] = { instance: members(cls.prototype).sort(), static: members(cls).sort() }
   }
   return surface

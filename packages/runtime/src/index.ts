@@ -32,6 +32,11 @@ export class Runtime {
   private options: Required<Omit<RuntimeOptions, 'memory' | 'persist'>> & { memory?: MemoryPolicy }
   /** This runtime's `persist()` cache: the process default unless the constructor was given its own. */
   readonly persist: PersistCache
+  /**
+   * Lineage: `withEngine()` forks share their origin's root (same cache, backends and tenant). Frames on runtimes
+   * with different roots belong to different owners and are not combined implicitly — see `resolveRuntime`.
+   */
+  readonly root: Runtime = this
 
   constructor(options: RuntimeOptions = {}) {
     this.options = {
@@ -81,6 +86,7 @@ export class Runtime {
     for (const backend of this.backends.values()) {
       if (backend.name !== 'cpu') rt.register(backend)
     }
+    ;(rt as { root: Runtime }).root = this.root
     return rt
   }
 
@@ -138,26 +144,33 @@ export class Runtime {
       const rawPlan = plan
       plan = optimizePlan(plan)
       checkGuard(guard, 'optimize')
-      const cached = this.persist.lookup(plan)
-      if (cached) {
+      const requested = this.options.engine
+      const strict = this.options.strict
+      // A strict request is answered from the cache only with a table the requested engine produced;
+      // otherwise the plan runs and either that engine executes it or EngineStrictError is raised.
+      const probe = this.persist.probe(plan, { requested, strict })
+      if (probe.status === 'hit') {
         const mem = getExecMemoryStats()
         return {
-          table: cached.table,
+          table: probe.table,
           report: {
-            requested: this.options.engine,
-            dispatched: 'cpu',
-            strict: this.options.strict,
+            requested,
+            dispatched: probe.provenance.dispatched,
+            strict,
             events: [],
             fallbacks: [],
             totalMs: 0,
-            backendsUsed: ['cpu'],
+            backendsUsed: [...probe.provenance.backendsUsed],
             spilledBytes: mem.spilledBytes,
             peakBytes: mem.peakBytes,
             cacheHit: true,
+            cachedFrom: { ...probe.provenance, backendsUsed: [...probe.provenance.backendsUsed] },
           },
         }
       }
-      return this.executeWithReportInner(plan, rawPlan, guard)
+      const out = await this.executeWithReportInner(plan, rawPlan, guard)
+      if (probe.status === 'skip') out.report.cacheSkipped = probe.reason
+      return out
     })
   }
 
@@ -184,7 +197,6 @@ export class Runtime {
     const finish = (table: TableView, dispatched: EngineKind): { table: TableView; report: ExecutionReport } => {
       const backendsUsed = [...new Set(events.map((e) => e.backend))]
       const mem = getExecMemoryStats()
-      this.persist.maybeStore(plan, table)
       const report: ExecutionReport = {
         requested,
         dispatched,
@@ -204,6 +216,8 @@ export class Runtime {
         ]
         throw new EngineStrictError(requested, reasons)
       }
+      // stored only after the strict contract held, with what produced it
+      this.persist.maybeStore(plan, table, { requested, dispatched, strict, backendsUsed })
       return { table, report }
     }
     const run = async (b: Backend): Promise<TableView> => {
@@ -242,14 +256,62 @@ export class Runtime {
 const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
 let defaultRuntime: Runtime | null = null
+/** Roots of every runtime that has served as the process default (frames built without a runtime point there). */
+const processDefaultRoots = new WeakSet<Runtime>()
 
 export function getDefaultRuntime(): Runtime {
   if (!defaultRuntime) defaultRuntime = new Runtime()
+  processDefaultRoots.add(defaultRuntime.root)
   return defaultRuntime
 }
 
 export function setDefaultRuntime(runtime: Runtime): void {
   defaultRuntime = runtime
+  processDefaultRoots.add(runtime.root)
+}
+
+/** True for the process default runtime and its `withEngine` forks — i.e. a frame nobody bound to a session. */
+export function isProcessDefaultRuntime(runtime: Runtime): boolean {
+  return processDefaultRoots.has(runtime.root)
+}
+
+/** Frames bound to different runtimes (sessions / tenants) were combined without saying which runtime runs the result. */
+export class RuntimeMismatchError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly runtimes: readonly Runtime[],
+  ) {
+    super(
+      `${operation}: the inputs are bound to ${runtimes.length} different runtimes (sessions). Rebind them first — ` +
+        `session.bind(frame) — or pass { runtime } to choose the runtime that executes the result.`,
+    )
+    this.name = 'RuntimeMismatchError'
+  }
+}
+
+/**
+ * The runtime a multi-input operation (concat, join, cross / as-of join) runs on:
+ *  1. an explicit `runtime` wins;
+ *  2. inputs on the process default runtime are unbound and adopt the others' runtime;
+ *  3. bound inputs must share one lineage (`root`), else `RuntimeMismatchError` — two tenants never mix implicitly;
+ *  4. within that lineage the receiver's runtime (its `engine()` fork) is kept when it belongs to it;
+ *  5. all inputs unbound: the receiver's runtime, else the first input's.
+ * The result never falls back to the process default when any input is bound.
+ */
+export function resolveRuntime(
+  operation: string,
+  inputs: readonly Runtime[],
+  options: { receiver?: Runtime; explicit?: Runtime } = {},
+): Runtime {
+  if (options.explicit) return options.explicit
+  const bound = inputs.filter((r) => !isProcessDefaultRuntime(r))
+  const roots = [...new Set(bound.map((r) => r.root))]
+  if (roots.length > 1) throw new RuntimeMismatchError(operation, roots)
+  if (roots.length === 1) {
+    if (options.receiver && options.receiver.root === roots[0]) return options.receiver
+    return bound[0]!
+  }
+  return options.receiver ?? inputs[0] ?? getDefaultRuntime()
 }
 
 export * from './types.js'
@@ -266,6 +328,10 @@ export {
   PersistCache,
   defaultPersistCache,
   type PersistCacheOptions,
+  type PersistCacheStats,
+  type PersistOptions,
+  type PersistProvenance,
+  type PersistProbe,
   hashPlan,
   storePersistCache,
   dropPersistCache,

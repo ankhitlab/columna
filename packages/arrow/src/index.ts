@@ -642,4 +642,60 @@ export function fromArrowLike(arrow: ArrowLike): TableView {
   return tableFromColumns(columns)
 }
 
-export { toArrowIpc, fromArrowIpc, type ArrowIpcWriteOptions } from './ipc.js'
+export { toArrowIpc, fromArrowIpc, type ArrowIpcWriteOptions, type ArrowIpcReadOptions } from './ipc.js'
+
+// ---- buffer ownership --------------------------------------------------------------------------------
+// A table built zero-copy over caller-owned typed arrays (`DataFrame.fromColumns(cols, { copy: false })`)
+// aliases memory the caller can still write to. Its buffers are recorded here so layers that rely on
+// immutability — the persist() cache above all — can refuse such tables instead of serving stale results.
+const borrowedBuffers = new WeakSet<ArrayBufferLike>()
+
+/** Record the caller-owned buffers of a zero-copy column (data, validity bitmap). */
+export function markBorrowedColumn(column: Column): void {
+  if (!Array.isArray(column.data)) borrowedBuffers.add((column.data as ArrayBufferView).buffer)
+  if (column.nullBitmap) borrowedBuffers.add(column.nullBitmap.buffer)
+}
+
+/** True when any column of the table is a view over caller-owned (mutable) memory. */
+export function isBorrowedTable(table: TableView): boolean {
+  for (const c of table.columns) {
+    if (!Array.isArray(c.data) && borrowedBuffers.has((c.data as ArrayBufferView).buffer)) return true
+    if (c.nullBitmap && borrowedBuffers.has(c.nullBitmap.buffer)) return true
+  }
+  return false
+}
+
+// ---- 64-bit integers ---------------------------------------------------------------------------------
+/**
+ * What a reader does with a 64-bit integer column (Arrow Int64 / UInt64, Parquet INT64, driver BigInts):
+ *  - `'error'` (default): values within ±(2^53 − 1) become an exact f64 column; if any value is outside, the read
+ *    fails with `PrecisionLossError` naming the column, row and value — nothing is silently rounded;
+ *  - `'string'`: the whole column becomes utf8 decimal strings — exact for every value (IDs, join keys);
+ *  - `'number'`: explicit lossy opt-in — the nearest double (2^53 + 1 → 2^53).
+ * columna has no i64 dtype; see docs/compatibility.md.
+ */
+export type Int64Policy = 'error' | 'string' | 'number'
+
+export class PrecisionLossError extends Error {
+  constructor(
+    readonly column: string,
+    readonly row: number,
+    /** The exact value, in decimal. */
+    readonly value: string,
+    readonly source: string,
+  ) {
+    super(
+      `${source}: column "${column}" row ${row} holds ${value}, which a double cannot represent exactly ` +
+        `(|v| > 2^53 − 1). Read it with { int64: 'string' } to keep exact decimal strings, or { int64: 'number' } ` +
+        `to accept the nearest double.`,
+    )
+    this.name = 'PrecisionLossError'
+  }
+}
+
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
+
+/** True when the BigInt is within ±(2^53 − 1), i.e. converts to a double and back unchanged and unambiguously. */
+export function isSafeBigInt(v: bigint): boolean {
+  return v <= MAX_SAFE && v >= -MAX_SAFE
+}
