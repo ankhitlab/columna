@@ -67,3 +67,5 @@ packages/studio/
 coverage/
 docs/api/
 site/
+release/
+pnpm-publish-summary.json

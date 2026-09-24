@@ -51,7 +51,7 @@ jobs:
           pnpm --dir packages/columna pack --pack-destination "$PWD/release"
           (cd release && sha256sum columna-*.tgz > SHA256SUMS)
           cat release/SHA256SUMS
-          node scripts/changelog-section.mjs "$VERSION" > release/notes.md
+          node scripts/changelog-section.mjs "$VERSION" --links "https://github.com/${{ github.repository }}/blob/$GITHUB_REF_NAME" > release/notes.md
           printf '\n---\n`npm install columna@%s`\n\nTarball SHA-256:\n```\n' "$VERSION" >> release/notes.md
           cat release/SHA256SUMS >> release/notes.md
           printf '```\n' >> release/notes.md

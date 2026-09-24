@@ -184,6 +184,13 @@ script compiled DuckDB from source. Fix: `pnpm.neverBuiltDependencies` for the b
 `nodejs-polars`) and for `better-sqlite3` (no test needs its binary), so no install step depends on a prebuild
 existing for the running Node. Rebuild them locally (`pnpm rebuild duckdb`) only to run the comparison benches.
 
+**v0.3.0 release notes unreadable on GitHub** (fixed 2026-09-24). The release was cut by hand on Windows: the notes were
+redirected with Windows PowerShell 5.1's `>`, which writes UTF-16LE, after the console had already decoded the UTF-8
+CHANGELOG in the OEM code page (`±` → `┬▒`, `∅` → `тИЕ`). The tarball was correct (identical to npm). Fix: notes
+regenerated from the tag's CHANGELOG, `SHA256SUMS` attached; `changelog-section.mjs` always writes UTF-8 and
+`--links` makes relative links absolute (they 404 on a release page); releases go through `release.yml` (bash on
+Linux), not a local shell.
+
 **CRLF line endings on Windows contributors' machines**. Tools that rewrite files (`sed -i`) strip `\r` and
 produce whole-file diffs. `.gitattributes` normalises on commit; edit with CR-aware tooling.
 
