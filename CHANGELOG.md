@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-24
+
 Correctness release: no new operators; four defects fixed and the semantics that allowed them made explicit.
+
+### Upgrading from 0.3
+
+- **Reads that hit a 64-bit integer beyond ±(2^53 − 1) now throw `PrecisionLossError`** (Arrow Int64 / UInt64,
+  Parquet INT64, JSON, SQL BigInts) instead of returning a rounded number or a per-value string. For IDs and join
+  keys pass `{ int64: 'string' }`; to keep the old lossy numbers pass `{ int64: 'number' }`.
+- **`fromColumns` copies typed arrays by default.** Code that wrote into its arrays to change a frame must pass
+  `{ copy: false }` (such frames are not `persist()`-cached). Very large inputs that relied on zero-copy for memory
+  should pass it too.
+- **Frames of two different sessions can no longer be joined / concatenated implicitly** — `RuntimeMismatchError`;
+  `session.bind(frame)` one side or pass `{ runtime }`.
+- `simpson(y, x)` returns different (correct) values for any explicit `x`; results of 0.3 were trapezoid values.
+- Plans calling `mapElements` are no longer `persist()`-cached unless `persist({ trustUdfs: true })`.
 
 ### Fixed
 
