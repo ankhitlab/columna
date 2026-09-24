@@ -1,0 +1,52 @@
+name: Publish release to npm
+
+# Publishes the tarball attached to an existing GitHub Release (vX.Y.Z) to npm with provenance, after checking it
+# against the release's SHA256SUMS and the tag's package.json. Use it when release.yml ran without NPM_TOKEN.
+#
+#   gh workflow run publish-npm.yml -f tag=v0.4.0
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z)
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: check inputs
+        env:
+          TAG: ${{ inputs.tag }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NPM_TOKEN" || { echo "::error::NPM_TOKEN secret is not set"; exit 1; }
+          VERSION="${TAG#v}"
+          PKG=$(node -p "require('./packages/columna/package.json').version")
+          test "$VERSION" = "$PKG" || { echo "::error::tag $TAG but package.json says $PKG"; exit 1; }
+          if npm view "columna@$VERSION" version >/dev/null 2>&1; then echo "::error::columna@$VERSION is already on npm"; exit 1; fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: download and verify the release tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p release && cd release
+          gh release download "$TAG" -p "columna-$VERSION.tgz" -p SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: npm publish (provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "release/columna-$VERSION.tgz" --provenance --access public

@@ -72,5 +72,11 @@ git commit -am "Release 0.3.0" && git tag v0.3.0 && git push --follow-tags
 [`release.yml`](.github/workflows/release.yml) refuses a tag whose version differs from `package.json` or has no
 CHANGELOG section, runs lint / build / typecheck / tests / the clean-consumer install, packs the tarball, creates the
 **GitHub Release** with the CHANGELOG section and the tarball's SHA-256, and — when the `NPM_TOKEN` repository
-secret exists — publishes to npm with provenance (`--provenance`, so the package page links back to the workflow
-run and commit). Pin consumers to the tag or the tarball hash, not to `main`.
+secret exists — publishes **that same tarball** to npm with provenance (`--provenance`, so the package page links
+back to the workflow run and commit). Without the secret the run ends with a warning and nothing is on npm; add the
+secret and run **Publish release to npm** (`gh workflow run publish-npm.yml -f tag=vX.Y.Z`), which downloads the
+release tarball, checks it against `SHA256SUMS` and publishes it. The versioned docs pick up the tag on the next
+`main` build (the release commit is one). Pin consumers to the tag or the tarball hash, not to `main`.
+
+Cut releases only through the workflow. Notes produced on Windows PowerShell 5.1 with `>` end up UTF-16LE and
+unreadable on GitHub — that is what happened to v0.3.0.

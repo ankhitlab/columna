@@ -59,10 +59,22 @@ jobs:
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/columna-*.tgz release/SHA256SUMS --title "columna $VERSION" --notes-file release/notes.md
+        # idempotent, so a re-run (e.g. after adding NPM_TOKEN) does not fail here
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/columna-*.tgz release/SHA256SUMS --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "columna $VERSION" --notes-file release/notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" release/columna-*.tgz release/SHA256SUMS --title "columna $VERSION" --notes-file release/notes.md
+          fi
 
+      # Publishes the very tarball attached to the release (same SHA-256), not a second build.
       - name: npm publish (provenance)
         if: env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm --filter columna publish --provenance --access public --no-git-checks
+        run: npm publish release/columna-*.tgz --provenance --access public
+
+      - name: npm publish skipped
+        if: env.NPM_TOKEN == ''
+        run: echo "::warning title=npm publish skipped::NPM_TOKEN secret is not set — the GitHub Release exists but columna $VERSION is NOT on npm. Add the secret and run the 'Publish release to npm' workflow for $GITHUB_REF_NAME."
