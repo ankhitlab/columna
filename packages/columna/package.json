@@ -110,7 +110,7 @@
     "@columna/wasm": "workspace:*",
     "@columna/webgpu": "workspace:*",
     "tsup": "^8.3.5",
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   },
   "directories": {
     "test": "tests"
