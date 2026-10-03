@@ -105,6 +105,25 @@ type Renamed<S, M> = { [K in keyof S as K extends keyof M ? (M[K] extends string
 type AggResult<A> = { [K in keyof A]: A[K] extends Expr<infer T, any> ? (unknown extends T ? number : T) : number }
 /** Value type of a column as `Series.toArray()` reports it: the schema's type, or the cell union when unknown. */
 type Cell<T> = unknown extends T ? number | string | boolean | null : T
+/** Constructor policies also accepted by Session.fromRows. */
+export type FromRowsOptions<P extends Int64Policy = Int64Policy> = { int64?: P; source?: string }
+type RowKeys<T> = T extends unknown ? keyof T & string : never
+type RowCell<T, K extends PropertyKey> = T extends unknown ? K extends keyof T ? T[K] : null : never
+/** Widen primitives: column-wide inference can stringify/coerce another primitive in the column. */
+type NormalizedRowCell<V, P extends Int64Policy> = unknown extends V ? unknown
+  : V extends null | undefined ? null
+    : V extends bigint ? P extends 'string' ? string : number
+      : V extends Date | number ? number
+        : V extends boolean ? boolean
+          : string
+/** Types returned by fromRows, not the input object types. Missing/undefined cells read as null.
+ * A union of input primitive families is conservatively retained after normalization; it is not a
+ * claim that physical columns support heterogeneous storage.
+ */
+export type InferRows<T extends Row, P extends Int64Policy = 'error'> = {
+  [K in RowKeys<T>]: NormalizedRowCell<RowCell<T, K>, P>
+}
+
 /** Schema inferred from `fromColumns` input. */
 type ColumnValue<C> = C extends Float64Array | Float32Array | Int32Array | Uint32Array
   ? number
@@ -147,6 +166,12 @@ export type {
   KafkaRawMessage,
   KafkaSaslOptions,
 } from './io/kafka/types.js'
+
+/** Common peek-size contract: finite counts are truncated and clamped at zero. */
+function peekSize(n: number): number {
+  if (!Number.isFinite(n)) throw new RangeError('head/tail: count must be finite')
+  return Math.max(0, Math.trunc(n))
+}
 
 export class LazyFrame<S extends Row = Row> {
   /** @internal phantom schema; never assigned at runtime */
@@ -331,11 +356,12 @@ export class LazyFrame<S extends Row = Row> {
   }
 
   head(n = 5): LazyFrame<S> {
-    return new LazyFrame<any>({ type: 'limit', input: this.plan, n }, this.runtime)
+    return new LazyFrame<any>({ type: 'limit', input: this.plan, n: peekSize(n) }, this.runtime)
   }
 
   tail(n = 5): LazyFrame<S> {
-    return new LazyFrame<any>({ type: 'slice', input: this.plan, start: -n }, this.runtime)
+    const count = peekSize(n)
+    return new LazyFrame<any>({ type: 'slice', input: this.plan, start: -count, ...(count === 0 ? { end: 0 } : {}) }, this.runtime)
   }
 
   limit(n: number, offset = 0): LazyFrame<S> {
@@ -427,13 +453,29 @@ export class LazyFrame<S extends Row = Row> {
         : [options.rightOn]
       : on
     if (!leftOn || !rightOn) throw new Error('join requires on or leftOn/rightOn')
+    if (leftOn.length === 0 || rightOn.length === 0) {
+      throw new RangeError('join: keys must not be empty; use crossJoin() or how: "cross" for a Cartesian product')
+    }
+    if (leftOn.length !== rightOn.length) {
+      throw new RangeError(`join: leftOn has ${leftOn.length} keys, rightOn has ${rightOn.length}; expected equal lengths`)
+    }
+    const checkKeys = (keys: string[], plan: PlanNode, side: string): void => {
+      const fields = schemaFieldsFromPlan(plan)
+      if (!fields) return // Dynamic output schemas are checked by the executor.
+      const names = new Set(fields.map((field) => field.name))
+      for (const key of keys) {
+        if (!names.has(key)) throw new Error(`join: unknown ${side} key "${key}"; available columns: ${[...names].join(', ')}`)
+      }
+    }
+    checkKeys(leftOn, this.plan, 'left')
+    checkKeys(rightOn, rightPlan, 'right')
     return new LazyFrame<any>(
       {
         type: 'join',
         left: this.plan,
         right: rightPlan,
-        leftOn,
-        rightOn,
+        leftOn: [...leftOn],
+        rightOn: [...rightOn],
         how,
         lSuffix,
         rSuffix,
@@ -916,8 +958,13 @@ export class Series<T = number | string | boolean | null> {
   }
 
   toArray(): T[] {
+    return this.readRange(0, this.numRows)
+  }
+
+  /** Decode only the requested cells; head/tail must not allocate the whole series. */
+  private readRange(start: number, end: number): T[] {
     const out: Array<number | string | boolean | null> = []
-    for (let i = 0; i < this.numRows; i++) {
+    for (let i = start; i < end; i++) {
       if (!isValid(this.column.nullBitmap, i)) {
         out.push(null)
         continue
@@ -971,12 +1018,11 @@ export class Series<T = number | string | boolean | null> {
   }
 
   unique(): T[] {
-    const seen = new Set<string>()
+    const seen = new Set<T>()
     const out: T[] = []
     for (const v of this.toArray()) {
-      const k = String(v)
-      if (seen.has(k)) continue
-      seen.add(k)
+      if (seen.has(v)) continue
+      seen.add(v)
       out.push(v)
     }
     return out
@@ -1025,11 +1071,11 @@ export class Series<T = number | string | boolean | null> {
   }
 
   head(n = 5): T[] {
-    return this.toArray().slice(0, n)
+    return this.readRange(0, Math.min(this.numRows, peekSize(n)))
   }
 
   tail(n = 5): T[] {
-    return this.toArray().slice(-n)
+    return this.readRange(Math.max(0, this.numRows - peekSize(n)), this.numRows)
   }
 }
 
@@ -1133,12 +1179,12 @@ export class DataFrame<S extends Row = Row> {
   }
   /** Sync peek — returns a materialized frame (LazyFrame.head stays lazy). */
   head(n = 5): DataFrame<S> {
-    const end = Math.min(Math.max(0, n), this.table.numRows)
+    const end = Math.min(peekSize(n), this.table.numRows)
     return new DataFrame<S>(sliceTable(this.table, 0, end), this.runtime)
   }
   /** Sync peek from the end — returns a materialized frame. */
   tail(n = 5): DataFrame<S> {
-    const start = Math.max(0, this.table.numRows - Math.max(0, n))
+    const start = Math.max(0, this.table.numRows - peekSize(n))
     return new DataFrame<S>(sliceTable(this.table, start, this.table.numRows), this.runtime)
   }
   /** Print `head(n)` as markdown to the console; returns `this` for chaining. */
@@ -1425,8 +1471,11 @@ export class DataFrame<S extends Row = Row> {
    * `options.int64` (see `Int64Policy`): by default a column of safe BigInts becomes an exact f64 column and a
    * value beyond ±(2^53 − 1) raises `PrecisionLossError`; `'string'` keeps exact decimal strings.
    */
-  static fromRows<T extends Row>(rows: readonly T[], options: { int64?: Int64Policy; source?: string } = {}): DataFrame<T> {
-    if (rows.length === 0) return new DataFrame<T>(tableFromColumns([]))
+  static fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions<'string'> & { int64: 'string' }): DataFrame<InferRows<T, 'string'>>
+  static fromRows<T extends Row>(rows: readonly T[], options?: FromRowsOptions<'error' | 'number'>): DataFrame<InferRows<T>>
+  static fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions): DataFrame<InferRows<T, Int64Policy>>
+  static fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions = {}): DataFrame<InferRows<T, Int64Policy>> {
+    if (rows.length === 0) return new DataFrame<InferRows<T, Int64Policy>>(tableFromColumns([]))
     const n = rows.length
     const names = Object.keys(rows[0]!)
     // Union of keys across rows (pandas semantics); the fast path is rows sharing the first row's shape.

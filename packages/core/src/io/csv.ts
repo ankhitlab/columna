@@ -56,6 +56,7 @@ export function parseCsvLine(line: string, delimiter: string, quoteChar = '"'): 
 
 /** Fill `out` with fields of `line` (clears `out` first). Reuse the same array across rows. */
 export function parseCsvLineInto(line: string, delimiter: string, quoteChar: string, out: string[], quoted?: boolean[]): void {
+  if (delimiter.length === 0) throw new RangeError('CSV separator must not be empty')
   out.length = 0
   if (quoted) quoted.length = 0
   // Fast path: no quotes → delimiter splits via slices (2M×8 bench CSV never quotes).
@@ -94,9 +95,10 @@ export function parseCsvLineInto(line: string, delimiter: string, quoteChar: str
       } else inQuotes = !inQuotes
       continue
     }
-    if (ch === delimiter && !inQuotes) {
+    if (!inQuotes && line.startsWith(delimiter, i)) {
       out.push(extractField(line, start, i, quoteChar, escaped))
       if (quoted) quoted.push(line[start] === quoteChar)
+      i += delimiter.length - 1
       start = i + 1
       escaped = false
     }

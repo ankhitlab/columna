@@ -8,6 +8,7 @@
   "include": [
     "src/**/*.ts",
     "tests/schema-types.test.ts",
-    "tests/review-types.test.ts"
+    "tests/review-types.test.ts",
+    "tests/audit-fixes-types.test.ts"
   ]
 }

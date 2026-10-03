@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-03
+
+### Fixed
+
+- Expression materialization no longer infers its dtype from row zero. Leading nulls no longer turn
+  shifted string/category labels into NaN or booleans into numbers; UDF results are evaluated once per row.
+- Anderson-Darling no longer extrapolates its p-value polynomial past adjusted A-squared 13. Very small
+  tails are reported as zero following statsmodels (a numerical reporting convention, not an exact probability).
+- Join projection pruning uses child output names and retains collision context; rename/drop/computed
+  projections no longer cause a valid query to read the wrong branch or invent an unsuffixed column.
+- Shapiro-Wilk W uses centered/scaled observations, paired coefficients and compensated sums to avoid
+  loss of precision after a large additive shift.
+- Multi-character CSV separators work in quoted records, including escaped quotes and embedded newlines.
+- Series.unique/nunique distinguish null from the literal string "null".
+- LazyFrame.tail(0) and Series.tail(0) are empty, matching DataFrame.tail(0); Series head/tail decode only
+  the requested range. Join-key arrays are copied so caller mutation cannot change a validated plan.
+
+### Changed
+
+- Computed expression types no longer retain a source column or an earlier alias name. Runtime names
+  are unchanged; put alias() last for a statically named computed column.
+- fromRows() types now describe normalized outputs: Date becomes milliseconds, bigint becomes number
+  or string according to Int64Policy, and missing/undefined cells become null. Session.fromRows accepts
+  and forwards the same policies. InferRows and FromRowsOptions are exported as types.
+- Mixed primitive families in an evaluated UDF/conditional column now throw instead of silently coercing
+  results; cast the whole expression explicitly when conversion is intended.
+- head/tail counts are finite, truncated toward zero and clamped at zero. NaN/Infinity/-Infinity throw.
+- Ordinary joins reject empty or unequal key lists and unknown keys when the schema is known.
+  Use crossJoin() or how: 'cross' for an intentional Cartesian product. Empty CSV separators throw.
+- See docs/audit-fixes.md for compatibility details and the regression commands.
+
 ## [0.4.0] - 2026-09-24
 
 Correctness release: no new operators; four defects fixed and the semantics that allowed them made explicit.

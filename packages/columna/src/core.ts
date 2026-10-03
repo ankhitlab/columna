@@ -1,5 +1,5 @@
 export { DataFrame, LazyFrame, GroupBy, Series, Expr, col, cols, lit, aggExpr, when, dt, daysBetween, openSqlClient, setIoPolicy, getIoPolicy, io } from '@columna/core'
-export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinResult, InferColumns, AnyExpr, ColRefs, DTypeValue, IoSource, ReadCsvOptions, ReadJsonOptions, ReadExcelOptions, ReadParquetOptions } from '@columna/core'
+export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinResult, InferColumns, InferRows, FromRowsOptions, AnyExpr, ColRefs, DTypeValue, IoSource, ReadCsvOptions, ReadJsonOptions, ReadExcelOptions, ReadParquetOptions } from '@columna/core'
 export type { AggSpec } from '@columna/core'
 export { Session, createSession, type SessionOptions } from '@columna/core'
 export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'

@@ -63,6 +63,7 @@ function sortedClean(x: ArrayLike<number | null | undefined>, minN: number, name
  * Anderson–Darling test for normality with mean and sd estimated from the sample.
  * Statistic A² = −n − (1/n)·Σ(2i−1)[ln F(z₍ᵢ₎) + ln(1 − F(z₍ₙ₊₁₋ᵢ₎))]; the p-value uses the
  * D'Agostino & Stephens (1986) approximation on A*² = A²(1 + 0.75/n + 2.25/n²) — the same as Minitab.
+ * For A*² > 13, pValue is reported as zero (statsmodels convention); this is not an exact probability.
  */
 export function andersonDarling(x: ArrayLike<number | null | undefined>): NormalityResult {
   const { v, mean, sd } = sortedClean(x, 8, 'andersonDarling')
@@ -80,7 +81,12 @@ export function andersonDarling(x: ArrayLike<number | null | undefined>): Normal
   const a2 = -n - s / n
   const adjusted = a2 * (1 + 0.75 / n + 2.25 / (n * n))
   let p: number
-  if (adjusted >= 0.6) p = Math.exp(1.2937 - 5.709 * adjusted + 0.0186 * adjusted * adjusted)
+  // The Stephens polynomial is an approximation on A*² <= 13, not an asymptotic tail.
+  // Follow statsmodels normal_ad: saturate the very small tail to zero beyond that domain.
+  // Zero here is a numerical reporting convention, not an exact probability.
+  // https://www.statsmodels.org/v0.14.1/_modules/statsmodels/stats/_adnorm.html
+  if (adjusted > 13) p = 0
+  else if (adjusted >= 0.6) p = Math.exp(1.2937 - 5.709 * adjusted + 0.0186 * adjusted * adjusted)
   else if (adjusted >= 0.34) p = Math.exp(0.9177 - 4.279 * adjusted - 1.38 * adjusted * adjusted)
   else if (adjusted >= 0.2) p = 1 - Math.exp(-8.318 + 42.796 * adjusted - 59.938 * adjusted * adjusted)
   else p = 1 - Math.exp(-13.436 + 101.14 * adjusted - 223.73 * adjusted * adjusted)
@@ -137,13 +143,40 @@ export function shapiroWilk(x: ArrayLike<number | null | undefined>): NormalityR
       for (let i = 1; i < n - 1; i++) a[i] = m[i]! / se
     }
   }
-  let num = 0
-  let ssq = 0
+  // Translation and scale do not change W. Work relative to an observed middle value,
+  // not the rounded mean of the original large values. Scaling also avoids squaring huge numbers.
+  const origin = v[Math.floor(n / 2)]!
+  const scale = Math.max(Math.abs(v[0]! - origin), Math.abs(v[n - 1]! - origin))
+  const centered = new Float64Array(n)
+  let sum = 0
+  let correction = 0
   for (let i = 0; i < n; i++) {
-    num += a[i]! * v[i]!
-    ssq += (v[i]! - mean) ** 2
+    centered[i] = (v[i]! - origin) / scale
+    const term = centered[i]! - correction
+    const next = sum + term
+    correction = (next - sum) - term
+    sum = next
   }
-  const w = Math.min(1, (num * num) / ssq)
+  const centeredMean = sum / n
+  let num = 0
+  let numCorrection = 0
+  // Coefficients are antisymmetric; pair observations before multiplication.
+  for (let i = 0; i < Math.floor(n / 2); i++) {
+    const j = n - 1 - i
+    const term = a[j]! * (centered[j]! - centered[i]!) - numCorrection
+    const next = num + term
+    numCorrection = (next - num) - term
+    num = next
+  }
+  let ssq = 0
+  let ssqCorrection = 0
+  for (let i = 0; i < n; i++) {
+    const term = (centered[i]! - centeredMean) ** 2 - ssqCorrection
+    const next = ssq + term
+    ssqCorrection = (next - ssq) - term
+    ssq = next
+  }
+  const w = Math.min(1, Math.max(0, (num * num) / ssq))
   let p: number
   if (n === 3) {
     p = Math.max(0, (6 / Math.PI) * (Math.asin(Math.sqrt(w)) - Math.asin(Math.sqrt(0.75))))

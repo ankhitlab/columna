@@ -1,6 +1,6 @@
 export { Expr, col, cols, lit, aggExpr, when } from './expr.js'
 export type { AnyExpr, ColRefs, DTypeValue } from './expr.js'
-export { DataFrame, LazyFrame, GroupBy, Series, type AggSpec, type Row, type JoinResult, type InferColumns } from './dataframe.js'
+export { DataFrame, LazyFrame, GroupBy, Series, type AggSpec, type Row, type JoinResult, type InferColumns, type InferRows, type FromRowsOptions } from './dataframe.js'
 export type {
   IoSource,
   KafkaClient,

@@ -5,7 +5,7 @@ import { WebGpuBackend } from '@columna/webgpu'
 export { DataFrame, LazyFrame, GroupBy, Series, Expr, col, cols, lit, aggExpr, when, dt, daysBetween } from '@columna/core'
 // IO policy / explicit sources / SQL client ownership — the boundaries a server needs, same surface as @columna/core
 export { openSqlClient, setIoPolicy, getIoPolicy, io } from '@columna/core'
-export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinResult, InferColumns, AnyExpr, ColRefs, DTypeValue } from '@columna/core'
+export type { IoPolicy, IoLoadOptions, IoSourceMode, CsvWriteOptions, Row, JoinResult, InferColumns, InferRows, FromRowsOptions, AnyExpr, ColRefs, DTypeValue } from '@columna/core'
 export type {
   AggSpec,
   IoSource,

@@ -728,36 +728,107 @@ function rewriteAggs(expr: ExprNode, ctx: BroadcastCtx): ExprNode {
   }
 }
 
+/** Logical output type without evaluating data or a user function. `null` means a null literal;
+ * `undefined` means that only evaluating the results can determine their type. Dictionary-backed
+ * strings use utf8 when materialized because scalar evaluation returns labels, not dictionary codes.
+ */
+function expressionDtype(table: TableView, expr: ExprNode): DType | null | undefined {
+  switch (expr.type) {
+    case 'col': {
+      const dtype = getColumn(table, expr.name).field.dtype
+      return dtype === 'category' ? 'utf8' : dtype
+    }
+    case 'lit':
+      return expr.value === null ? null : typeof expr.value === 'string' ? 'utf8' : typeof expr.value === 'boolean' ? 'bool' : 'f64'
+    case 'alias':
+    case 'over':
+      return expressionDtype(table, expr.expr)
+    case 'cast':
+      return expr.dtype === 'category' ? 'utf8' : expr.dtype
+    case 'unary':
+      return expr.op === 'not' || expr.op === 'isNull' || expr.op === 'isNotNull' ? 'bool' : 'f64'
+    case 'binary':
+      return ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'and', 'or'].includes(expr.op) ? 'bool' : 'f64'
+    case 'str':
+      return expr.op === 'len' ? 'f64' : ['contains', 'startsWith', 'endsWith'].includes(expr.op) ? 'bool' : 'utf8'
+    case 'dt':
+    case 'clip':
+      return 'f64'
+    case 'isIn':
+    case 'isBetween':
+      return 'bool'
+    case 'rowOffset':
+      return expr.kind === 'shift' ? expressionDtype(table, expr.expr) : 'f64'
+    case 'agg':
+      // min/max currently coerce with Number(), just like the other numeric aggregates.
+      return expr.op === 'first' || expr.op === 'last' ? expressionDtype(table, expr.expr) : 'f64'
+    case 'fillNull':
+      return mergeExpressionDtypes([
+        expressionDtype(table, expr.expr),
+        typeof expr.value === 'string' ? 'utf8' : typeof expr.value === 'boolean' ? 'bool' : 'f64',
+      ])
+    case 'when':
+      return mergeExpressionDtypes([
+        ...expr.branches.map((b) => expressionDtype(table, b.then)),
+        expressionDtype(table, expr.otherwise),
+      ])
+    case 'mapElements':
+      return undefined
+  }
+}
+
+function mergeExpressionDtypes(types: Array<DType | null | undefined>): DType | null | undefined {
+  let result: DType | null = null
+  for (const dtype of types) {
+    if (dtype === undefined) return undefined
+    if (dtype === null) continue
+    if (result === null) result = dtype
+    else if (result !== dtype) {
+      if (isNumeric(result) && isNumeric(dtype)) result = 'f64'
+      else return undefined
+    }
+  }
+  return result
+}
+
 function materializeExprColumn(table: TableView, expr: ExprNode, name: string): Column {
+  // Resolve before rewriting aggregates: an all-null aggregate must not erase its logical type.
+  const declaredDtype = expressionDtype(table, expr)
   ;({ expr, table } = broadcastAggregates(expr, table))
-  const fast = tryFastExprColumn(table, expr, name)
-  if (fast) return fast
-  const sample = table.numRows > 0 ? evalExprScalar(expr, table, 0) : null
-  let dtype: DType = 'f64'
-  if (typeof sample === 'string') dtype = 'utf8'
-  else if (typeof sample === 'boolean') dtype = 'bool'
-  else if (expr.type === 'col') dtype = getColumn(table, expr.name).field.dtype
-  else if (expr.type === 'cast') dtype = expr.dtype
-  else if (expr.type === 'agg') dtype = 'f64'
-  else if (expr.type === 'str') {
-    dtype =
-      expr.op === 'len' ||
-      expr.op === 'contains' ||
-      expr.op === 'startsWith' ||
-      expr.op === 'endsWith'
-        ? expr.op === 'len'
-          ? 'f64'
-          : 'bool'
-        : 'utf8'
-  } else if (expr.type === 'dt') dtype = 'f64'
-  else if (expr.type === 'isIn' || expr.type === 'isBetween') dtype = 'bool'
+  let dtype: DType = declaredDtype ?? 'f64'
+  let values: Array<number | string | boolean | null> | undefined
+  if (declaredDtype !== undefined) {
+    const fast = tryFastExprColumn(table, expr, name)
+    if (fast && (fast.field.dtype === dtype || (dtype === 'utf8' && fast.field.dtype === 'category'))) return fast
+  } else {
+    // A UDF (possibly nested in a conditional) has no declared output type. Cache its results, rather
+    // than sampling row zero or evaluating it again during inference/materialization. Mixed primitive
+    // families have no lossless column representation: require an explicit cast instead of coercion.
+    values = new Array(table.numRows)
+    let kind: 'number' | 'string' | 'boolean' | undefined
+    for (let i = 0; i < table.numRows; i++) {
+      const value = evalExprScalar(expr, table, i)
+      values[i] = value
+      if (value === null) continue
+      const next = typeof value
+      if (next !== 'number' && next !== 'string' && next !== 'boolean') {
+        throw new TypeError(`Expression column "${name}" returned an unsupported value at row ${i}`)
+      }
+      if (kind !== undefined && kind !== next) {
+        throw new TypeError(`Expression column "${name}" has mixed result types (${kind}, ${next}) at row ${i}; use an explicit cast`)
+      }
+      kind = next
+    }
+    dtype = kind === 'string' ? 'utf8' : kind === 'boolean' ? 'bool' : 'f64'
+  }
+  const valueAt = (i: number): number | string | boolean | null => values ? values[i]! : evalExprScalar(expr, table, i)
 
   if (dtype === 'utf8') {
     const data: string[] = new Array(table.numRows)
     let anyNull = false
     const nullBitmap = new Uint8Array(Math.ceil(table.numRows / 8) || 1)
     for (let i = 0; i < table.numRows; i++) {
-      const v = evalExprScalar(expr, table, i)
+      const v = valueAt(i)
       if (v === null) {
         anyNull = true
         data[i] = ''
@@ -777,7 +848,7 @@ function materializeExprColumn(table: TableView, expr: ExprNode, name: string): 
   let anyNull = false
   const nullBitmap = new Uint8Array(Math.ceil(table.numRows / 8) || 1)
   for (let i = 0; i < table.numRows; i++) {
-    const v = evalExprScalar(expr, table, i)
+    const v = valueAt(i)
     if (v === null) {
       anyNull = true
       continue

@@ -17,8 +17,8 @@
  * ```
  */
 import { PersistCache, Runtime, getDefaultRuntime, type Backend, type RuntimeOptions, type PersistCacheOptions } from '@columna/runtime'
-import type { ArrowIpcReadOptions, ArrowLike } from '@columna/arrow'
-import { DataFrame, LazyFrame, type InferColumns, type Row } from './dataframe.js'
+import type { ArrowIpcReadOptions, ArrowLike, Int64Policy } from '@columna/arrow'
+import { DataFrame, LazyFrame, type InferColumns, type InferRows, type FromRowsOptions, type Row } from './dataframe.js'
 import type {
   IoLoadOptions,
   IoPolicy,
@@ -77,8 +77,11 @@ export class Session {
 
   // ---- constructors bound to the session ----------------------------------------------------------
 
-  fromRows<T extends Row>(rows: readonly T[]): DataFrame<T> {
-    return this.bind(DataFrame.fromRows(rows))
+  fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions<'string'> & { int64: 'string' }): DataFrame<InferRows<T, 'string'>>
+  fromRows<T extends Row>(rows: readonly T[], options?: FromRowsOptions<'error' | 'number'>): DataFrame<InferRows<T>>
+  fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions): DataFrame<InferRows<T, Int64Policy>>
+  fromRows<T extends Row>(rows: readonly T[], options: FromRowsOptions = {}): DataFrame<InferRows<T, Int64Policy>> {
+    return this.bind(DataFrame.fromRows(rows, options))
   }
 
   fromColumns<C extends Parameters<typeof DataFrame.fromColumns>[0]>(cols: C, options?: { copy?: boolean }): DataFrame<InferColumns<C>> {

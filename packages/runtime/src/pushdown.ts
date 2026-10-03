@@ -47,6 +47,60 @@ export function leafColumnNames(plan: PlanNode): Set<string> {
   return names
 }
 
+/** Exact output names for plan shapes whose naming rules are known here. Unknown is deliberately
+ * not approximated by leaf scans: that loses rename/drop/withColumn provenance and can corrupt a join.
+ */
+function outputColumnNames(plan: PlanNode): Set<string> | null {
+  switch (plan.type) {
+    case 'scan':
+      return new Set(plan.table.schema.map((field) => field.name))
+    case 'project':
+      return new Set(plan.columns.map((column, i) => typeof column === 'string' ? column
+        : column.type === 'col' || column.type === 'alias' ? column.name
+          : column.type === 'agg' && column.expr.type === 'col' ? `${column.op}_${column.expr.name}` : `expr_${i}`))
+    case 'groupBy':
+      return new Set([...plan.keys, ...plan.aggs.map((agg) => agg.name)])
+    case 'rename': {
+      const input = outputColumnNames(plan.input)
+      return input && new Set([...input].map((name) => plan.mapping[name] ?? name))
+    }
+    case 'drop': {
+      const input = outputColumnNames(plan.input)
+      if (input) for (const name of plan.columns) input.delete(name)
+      return input
+    }
+    case 'withColumn':
+    case 'window':
+    case 'rolling':
+    case 'expanding': {
+      const input = outputColumnNames(plan.input)
+      if (input) input.add(plan.name)
+      return input
+    }
+    case 'withColumns': {
+      const input = outputColumnNames(plan.input)
+      if (input) for (const column of plan.columns) input.add(column.name)
+      return input
+    }
+    case 'filter':
+    case 'sort':
+    case 'limit':
+    case 'slice':
+    case 'take':
+    case 'sample':
+    case 'fillNull':
+    case 'ffill':
+    case 'bfill':
+    case 'dropNull':
+    case 'unique':
+    case 'interpolate':
+      return outputColumnNames(plan.input)
+    default:
+      // Nested joins, dynamic pivots/unnests and concatenation need richer provenance.
+      return null
+  }
+}
+
 /**
  * Light projection pushdown: move simple column `project` nodes below sort / through
  * filter, and prune join inputs to columns needed by the projection + join keys.
@@ -83,8 +137,14 @@ export function pushdownProjections(plan: PlanNode): PlanNode {
       }
 
       if (input.type === 'join' && input.how !== 'cross') {
-        const leftCols = leafColumnNames(input.left)
-        const rightCols = leafColumnNames(input.right)
+        const leftCols = outputColumnNames(input.left)
+        const rightCols = outputColumnNames(input.right)
+        if (!leftCols || !rightCols) return { ...plan, input }
+        // Dropping either side of a collision changes suffix allocation. Until that provenance is
+        // modelled, retain both branches even when the requested name itself has no suffix.
+        const hasCollision = [...leftCols].some((name) => rightCols.has(name)
+          && !input.leftOn.some((key, i) => key === name && input.rightOn[i] === name))
+        if (hasCollision) return { ...plan, input }
         const lSuffix = input.lSuffix ?? ''
         const rSuffix = input.rSuffix ?? '_right'
 

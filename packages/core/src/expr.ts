@@ -10,6 +10,8 @@ import { DtNamespace } from './expr/dt.js'
  * phantom: `col('x')` is `Expr<any>` (nothing is known about a column named by string), `c.x` from a typed
  * frame's column refs is `Expr<S['x'], 'x'>`, comparisons produce `Expr<boolean>`, arithmetic `Expr<number>`.
  * Frames use them to type `filter`, `withColumn(s)`, `select` and `agg` results.
+ * Transformations create unnamed expressions: use `alias()` last to name a computed output.
+ * `asc()` / `desc()` only wrap an existing expression and retain its name.
  */
 export class Expr<T = any, N extends string = string> {
   /** @internal phantom — carries the value type; never assigned at runtime */
@@ -31,42 +33,42 @@ export class Expr<T = any, N extends string = string> {
     return new Expr({ type: 'alias', expr: this.node, name })
   }
 
-  cast<D extends DType>(dtype: D): Expr<DTypeValue<D>, N> {
+  cast<D extends DType>(dtype: D): Expr<DTypeValue<D>> {
     if (!DTYPES.has(dtype)) throw new RangeError(`cast: unknown dtype "${String(dtype)}" (expected ${[...DTYPES].join(' | ')})`)
     return new Expr({ type: 'cast', expr: this.node, dtype })
   }
 
-  fillNull<V extends number | string | boolean>(value: V): Expr<Exclude<T, null> | V, N> {
+  fillNull<V extends number | string | boolean>(value: V): Expr<Exclude<T, null> | V> {
     return new Expr({ type: 'fillNull', expr: this.node, value })
   }
 
-  isNull(): Expr<boolean, N> {
+  isNull(): Expr<boolean> {
     return new Expr({ type: 'unary', op: 'isNull', expr: this.node })
   }
 
-  isNotNull(): Expr<boolean, N> {
+  isNotNull(): Expr<boolean> {
     return new Expr({ type: 'unary', op: 'isNotNull', expr: this.node })
   }
 
-  not(): Expr<boolean, N> {
+  not(): Expr<boolean> {
     return new Expr({ type: 'unary', op: 'not', expr: this.node })
   }
 
-  abs(): Expr<number, N> {
+  abs(): Expr<number> {
     return new Expr({ type: 'unary', op: 'abs', expr: this.node })
   }
 
-  neg(): Expr<number, N> {
+  neg(): Expr<number> {
     return new Expr({ type: 'unary', op: 'neg', expr: this.node })
   }
 
   // Element-wise math (null → null, domain errors → NaN). Run on the typed fast path.
-  sqrt(): Expr<number, N> {
+  sqrt(): Expr<number> {
     return new Expr({ type: 'unary', op: 'sqrt', expr: this.node })
   }
 
   /** Natural log by default; pass `base` for log_b (e.g. `log(10)`). */
-  log(base?: number): Expr<number, N> {
+  log(base?: number): Expr<number> {
     return new Expr({ type: 'unary', op: 'log', expr: this.node, base })
   }
 
@@ -78,72 +80,72 @@ export class Expr<T = any, N extends string = string> {
     return new Expr({ type: 'unary', op: 'log2', expr: this.node })
   }
 
-  exp(): Expr<number, N> {
+  exp(): Expr<number> {
     return new Expr({ type: 'unary', op: 'exp', expr: this.node })
   }
 
   /** Round half away from zero (Minitab / Excel ROUND) to `decimals` places. */
-  round(decimals = 0): Expr<number, N> {
+  round(decimals = 0): Expr<number> {
     return new Expr({ type: 'unary', op: 'round', expr: this.node, decimals })
   }
 
-  floor(): Expr<number, N> {
+  floor(): Expr<number> {
     return new Expr({ type: 'unary', op: 'floor', expr: this.node })
   }
 
-  ceil(): Expr<number, N> {
+  ceil(): Expr<number> {
     return new Expr({ type: 'unary', op: 'ceil', expr: this.node })
   }
 
-  sign(): Expr<number, N> {
+  sign(): Expr<number> {
     return new Expr({ type: 'unary', op: 'sign', expr: this.node })
   }
 
-  pow(other: AnyExpr | number): Expr<number, N> {
+  pow(other: AnyExpr | number): Expr<number> {
     return bin('pow', this, other)
   }
 
-  eq(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  eq(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('eq', this, other)
   }
-  neq(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  neq(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('neq', this, other)
   }
-  gt(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  gt(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('gt', this, other)
   }
-  gte(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  gte(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('gte', this, other)
   }
-  lt(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  lt(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('lt', this, other)
   }
-  lte(other: AnyExpr | number | string | boolean | null): Expr<boolean, N> {
+  lte(other: AnyExpr | number | string | boolean | null): Expr<boolean> {
     return bin('lte', this, other)
   }
-  and(other: AnyExpr | boolean): Expr<boolean, N> {
+  and(other: AnyExpr | boolean): Expr<boolean> {
     return bin('and', this, other)
   }
-  or(other: AnyExpr | boolean): Expr<boolean, N> {
+  or(other: AnyExpr | boolean): Expr<boolean> {
     return bin('or', this, other)
   }
-  add(other: AnyExpr | number): Expr<number, N> {
+  add(other: AnyExpr | number): Expr<number> {
     return bin('add', this, other)
   }
-  sub(other: AnyExpr | number): Expr<number, N> {
+  sub(other: AnyExpr | number): Expr<number> {
     return bin('sub', this, other)
   }
-  mul(other: AnyExpr | number): Expr<number, N> {
+  mul(other: AnyExpr | number): Expr<number> {
     return bin('mul', this, other)
   }
-  div(other: AnyExpr | number): Expr<number, N> {
+  div(other: AnyExpr | number): Expr<number> {
     return bin('div', this, other)
   }
-  mod(other: AnyExpr | number): Expr<number, N> {
+  mod(other: AnyExpr | number): Expr<number> {
     return bin('mod', this, other)
   }
 
-  isIn(values: Array<number | string | boolean | null>): Expr<boolean, N> {
+  isIn(values: Array<number | string | boolean | null>): Expr<boolean> {
     return new Expr({ type: 'isIn', expr: this.node, values })
   }
 
@@ -151,7 +153,7 @@ export class Expr<T = any, N extends string = string> {
     low: AnyExpr | number | string,
     high: AnyExpr | number | string,
     closed: 'both' | 'left' | 'right' | 'neither' = 'both',
-  ): Expr<boolean, N> {
+  ): Expr<boolean> {
     return new Expr({
       type: 'isBetween',
       expr: this.node,
@@ -161,61 +163,61 @@ export class Expr<T = any, N extends string = string> {
     })
   }
 
-  clip(min?: number, max?: number): Expr<T, N> {
+  clip(min?: number, max?: number): Expr<T> {
     return new Expr({ type: 'clip', expr: this.node, min, max })
   }
 
-  shift(periods = 1): Expr<T | null, N> {
+  shift(periods = 1): Expr<T | null> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'shift' })
   }
 
-  diff(periods = 1): Expr<number | null, N> {
+  diff(periods = 1): Expr<number | null> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'diff' })
   }
 
-  pctChange(periods = 1): Expr<number | null, N> {
+  pctChange(periods = 1): Expr<number | null> {
     return new Expr({ type: 'rowOffset', expr: this.node, periods, kind: 'pctChange' })
   }
 
-  mapElements<R extends number | string | boolean | null>(fn: (value: number | string | boolean | null) => R): Expr<R, N> {
+  mapElements<R extends number | string | boolean | null>(fn: (value: number | string | boolean | null) => R): Expr<R> {
     return new Expr({ type: 'mapElements', expr: this.node, fn })
   }
 
-  sum(): Expr<number, N> {
+  sum(): Expr<number> {
     return new Expr({ type: 'agg', op: 'sum', expr: this.node })
   }
-  mean(): Expr<number, N> {
+  mean(): Expr<number> {
     return new Expr({ type: 'agg', op: 'mean', expr: this.node })
   }
-  min(): Expr<T, N> {
+  min(): Expr<T> {
     return new Expr({ type: 'agg', op: 'min', expr: this.node })
   }
-  max(): Expr<T, N> {
+  max(): Expr<T> {
     return new Expr({ type: 'agg', op: 'max', expr: this.node })
   }
-  count(): Expr<number, N> {
+  count(): Expr<number> {
     return new Expr({ type: 'agg', op: 'count', expr: this.node })
   }
-  nunique(): Expr<number, N> {
+  nunique(): Expr<number> {
     return new Expr({ type: 'agg', op: 'nunique', expr: this.node })
   }
-  first(): Expr<T, N> {
+  first(): Expr<T> {
     return new Expr({ type: 'agg', op: 'first', expr: this.node })
   }
-  last(): Expr<T, N> {
+  last(): Expr<T> {
     return new Expr({ type: 'agg', op: 'last', expr: this.node })
   }
-  std(): Expr<number, N> {
+  std(): Expr<number> {
     return new Expr({ type: 'agg', op: 'std', expr: this.node })
   }
-  var(): Expr<number, N> {
+  var(): Expr<number> {
     return new Expr({ type: 'agg', op: 'var', expr: this.node })
   }
   /**
    * Median. `method`: 'linear' (default; type 7, pandas / polars) or 'minitab' (type 6, position p(n + 1)) —
    * both give the middle value / midpoint for the median, the choice matters for other quantiles.
    */
-  median(method?: QuantileMethod): Expr<number, N> {
+  median(method?: QuantileMethod): Expr<number> {
     return new Expr({ type: 'agg', op: 'median', expr: this.node, ...(method ? { qm: method } : {}) })
   }
   /**
@@ -223,7 +225,7 @@ export class Expr<T = any, N extends string = string> {
    *   col('x').quantile(0.25)             // type 7: position (n − 1)q, linear interpolation (pandas default)
    *   col('x').quantile(0.25, 'minitab')  // type 6: position q(n + 1), clamped to the sample — Minitab / SPSS / R type=6
    */
-  quantile(q: number, method?: QuantileMethod): Expr<number, N> {
+  quantile(q: number, method?: QuantileMethod): Expr<number> {
     return new Expr({ type: 'agg', op: 'quantile', expr: this.node, q, ...(method ? { qm: method } : {}) })
   }
 
@@ -241,7 +243,7 @@ export class Expr<T = any, N extends string = string> {
       orderBy?: string | string[]
       descending?: boolean
     } = {},
-  ): Expr<T, N> {
+  ): Expr<T> {
     const keys = Array.isArray(partitionBy) ? partitionBy : [partitionBy]
     const orderBy = options.orderBy === undefined ? undefined : Array.isArray(options.orderBy) ? options.orderBy : [options.orderBy]
     if (keys.length === 0 && !orderBy?.length) throw new Error('over() needs at least one partition column or an orderBy')
