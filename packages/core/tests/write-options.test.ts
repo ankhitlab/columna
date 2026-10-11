@@ -159,12 +159,19 @@ describe('present / Arrow / toBlob options', () => {
     expect(back.columns).toEqual(['a'])
   })
 
-  it('toBlob csv / json / parquet', async () => {
+  it('toBlob csv / json / parquet-like', async () => {
     expect(await new Response(df.toBlob('csv', { separator: ';' })).text()).toContain('a;b')
     expect(JSON.parse(await new Response(df.toBlob('json')).text())).toHaveLength(2)
-    const pq = df.toBlob('parquet', { codec: 'SNAPPY' })
-    expect(pq.type).toContain('parquet')
-    const back = await DataFrame.readParquet(new Uint8Array(await pq.arrayBuffer()))
+    const like = df.toBlob('parquet-like', { columns: ['a'] })
+    expect(like.type).toContain('json')
+    const payload = JSON.parse(await new Response(like).text()) as { columns: Array<{ name: string }> }
+    expect(payload.columns.map((c) => c.name)).toEqual(['a'])
+  })
+
+  it('writeParquet feeds a parquet Blob round-trip', async () => {
+    const bytes = await df.writeParquet(undefined, { codec: 'SNAPPY' })
+    const blob = new Blob([bytes], { type: 'application/vnd.apache.parquet' })
+    const back = await DataFrame.readParquet(new Uint8Array(await blob.arrayBuffer()))
     expect(back.shape[0]).toBe(2)
   })
 })

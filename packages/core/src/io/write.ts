@@ -1,18 +1,23 @@
-import { createRequire } from 'node:module'
 import type { Column, TableView } from '@columna/arrow'
 import { getColumn, isValid, tableFromColumns, toRowObjects } from '@columna/arrow'
 
-/** Resolve CJS deps from ESM (`import.meta.url`) or from the tsup CJS build (`require`). */
+/**
+ * Sync `require` without a static `node:module` import (that breaks browser bundles).
+ * Available in CJS builds and some Node loaders; ESM/browser callers should use the async writers.
+ */
 function syncNodeRequire(id: string): unknown {
   try {
-    if (typeof import.meta !== 'undefined' && import.meta.url) {
-      return createRequire(import.meta.url)(id)
-    }
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+    const req = new Function('return typeof require === "function" ? require : undefined')() as
+      | ((specifier: string) => unknown)
+      | undefined
+    if (typeof req === 'function') return req(id)
   } catch {
-    /* fall through to CJS require */
+    /* ignore */
   }
-  // tsup CJS output has a free `require`; avoid referencing it as an identifier so ESM typecheck stays clean.
-  return (0, eval)('require')(id) as unknown
+  throw new Error(
+    `${id}: sync require is unavailable in this environment — use the async writer (e.g. writeParquet) instead`,
+  )
 }
 
 /** Project a table to named columns (order preserved). */
