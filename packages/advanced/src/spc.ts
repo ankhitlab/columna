@@ -84,8 +84,8 @@ function d3Approx(n: number): number {
 
 /** Control-chart constants for subgroup size `n` (ASTM E2587 / Minitab). */
 export function spcConstants(n: number): SpcConstants {
-  const nn = Math.floor(n)
-  if (!(nn >= 2)) throw new RangeError(`spcConstants: n must be ≥ 2 (got ${n})`)
+  const nn = n
+  if (!Number.isSafeInteger(nn) || !(nn >= 2)) throw new RangeError(`spcConstants: n must be ≥ 2 (got ${n})`)
   const c4 = c4Of(nn)
   const d2 = nn <= 25 ? D2[nn]! : d2Approx(nn)
   const d3 = nn <= 25 ? D3[nn]! : d3Approx(nn)
@@ -114,6 +114,8 @@ export interface ChartPoint {
   beyondLimits: boolean
   /** Nelson rule numbers that fire on this point. */
   rules: NelsonRule[]
+  /** Unclipped one-sigma zone width, for standardizing variable-size charts. */
+  zoneSigma?: number
 }
 
 export interface ControlChartResult {
@@ -158,6 +160,7 @@ export function nelsonRules(
   }
   if (on.has(2)) {
     for (let i = 8; i < n; i++) {
+      if (!Array.from({ length: 9 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       const s = side(i)
       if (s === 0) continue
       let ok = true
@@ -170,6 +173,7 @@ export function nelsonRules(
   }
   if (on.has(3)) {
     for (let i = 5; i < n; i++) {
+      if (!Array.from({ length: 6 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       let up = true
       let down = true
       for (let k = 0; k < 5; k++) {
@@ -182,8 +186,9 @@ export function nelsonRules(
   }
   if (on.has(4)) {
     for (let i = 13; i < n; i++) {
+      if (!Array.from({ length: 14 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       let alt = true
-      for (let k = 0; k < 13; k++) {
+      for (let k = 0; k < 12; k++) {
         const d1 = values[i - k]! - values[i - k - 1]!
         const d0 = values[i - k - 1]! - values[i - k - 2]!
         if (d1 === 0 || d0 === 0 || Math.sign(d1) === Math.sign(d0)) {
@@ -196,6 +201,7 @@ export function nelsonRules(
   }
   if (on.has(5)) {
     for (let i = 2; i < n; i++) {
+      if (!Array.from({ length: 3 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       for (const s of [1, -1] as const) {
         let c = 0
         for (let k = 0; k < 3; k++) if (s * z[i - k]! > 2) c++
@@ -208,6 +214,7 @@ export function nelsonRules(
   }
   if (on.has(6)) {
     for (let i = 4; i < n; i++) {
+      if (!Array.from({ length: 5 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       for (const s of [1, -1] as const) {
         let c = 0
         for (let k = 0; k < 5; k++) if (s * z[i - k]! > 1) c++
@@ -220,8 +227,9 @@ export function nelsonRules(
   }
   if (on.has(7)) {
     for (let i = 14; i < n; i++) {
+      if (!Array.from({ length: 15 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       let ok = true
-      for (let k = 0; k < 15; k++) if (Math.abs(z[i - k]!) > 1) {
+      for (let k = 0; k < 15; k++) if (Math.abs(z[i - k]!) >= 1) {
         ok = false
         break
       }
@@ -230,8 +238,9 @@ export function nelsonRules(
   }
   if (on.has(8)) {
     for (let i = 7; i < n; i++) {
+      if (!Array.from({ length: 8 }, (_, k) => values[i - k]).every(Number.isFinite)) continue
       let ok = true
-      for (let k = 0; k < 8; k++) if (Math.abs(z[i - k]!) < 1) {
+      for (let k = 0; k < 8; k++) if (Math.abs(z[i - k]!) <= 1) {
         ok = false
         break
       }
@@ -292,8 +301,10 @@ function packPoints(
     const ui = ucls ? ucls[i]! : u0
     const li = lcls ? lcls[i]! : l0
     const beyond = values[i]! > ui || values[i]! < li
-    const r = fired[i]!
-    points.push({ index: i, value: values[i]!, n: ns?.[i], ucl: ui, lcl: li, center: ci, beyondLimits: beyond, rules: r })
+    // Rule 1 is defined by the actual (possibly clipped/asymmetric) limits, not a surrogate sigma.
+    const r: NelsonRule[] = fired[i]!.filter((rule) => rule !== 1)
+    if (rules.includes(1) && beyond) r.unshift(1)
+    points.push({ index: i, value: values[i]!, n: ns?.[i], ucl: ui, lcl: li, center: ci, zoneSigma: sigmas ? sigmas[i]! : s0, beyondLimits: beyond, rules: r })
     if (beyond) outOfControl.push(i)
     if (r.length) signals.push({ index: i, rules: r })
   }
@@ -330,6 +341,8 @@ export interface ControlChartOptions {
   sizes?: ArrayLike<number>
   /** Historical center for attribute charts. */
   center?: number
+  /** Optional historical Laney sigma-z; finite and positive. */
+  sigmaZ?: number
 }
 
 function movingRanges(x: number[]): number[] {
@@ -349,9 +362,11 @@ function shewhartIMR(x: number[], options: ControlChartOptions): ControlChartRes
   const lcl = center - 3 * sigma
   const rules = options.rules ?? ([1, 2, 3, 4, 5, 6, 7, 8] as NelsonRule[])
   const main = packPoints(x, center, ucl, lcl, sigma, rules)
-  const mrUcl = spcConstants(2).D4 * mrBar
-  const mrLcl = spcConstants(2).D3 * mrBar
-  const companion = packPoints(mr, mrBar, mrUcl, mrLcl, mrBar / 3 || 1, [1])
+  const mrCenter = options.sigma === undefined ? mrBar : d2 * sigma
+  const mrUcl = spcConstants(2).D4 * mrCenter
+  const mrLcl = spcConstants(2).D3 * mrCenter
+  const mrSigma = spcConstants(2).d3 * sigma
+  const companion = packPoints(mr, mrCenter, mrUcl, mrLcl, mrSigma, [1])
   return {
     type: 'i-mr',
     center,
@@ -359,7 +374,7 @@ function shewhartIMR(x: number[], options: ControlChartOptions): ControlChartRes
     ucl,
     lcl,
     ...main,
-    companion: { type: 'mr', center: mrBar, sigma: mrBar / 3, ucl: mrUcl, lcl: mrLcl, ...companion },
+    companion: { type: 'mr', center: mrCenter, sigma: mrSigma, ucl: mrUcl, lcl: mrLcl, ...companion },
   }
 }
 
@@ -370,7 +385,7 @@ function shewhartXbar(groups: number[][], useS: boolean, options: ControlChartOp
   const stats = groups.map((g) => (useS ? sdOf(g, 1) : rangeOf(g)))
   const n0 = ns[0]!
   const equal = ns.every((n) => n === n0)
-  const center = options.mu ?? meanOf(means)
+  const center = options.mu ?? groups.reduce((s, g) => s + meanOf(g) * g.length, 0) / ns.reduce((s, n) => s + n, 0)
   let sigma: number
   let ucl: number | number[]
   let lcl: number | number[]
@@ -383,12 +398,12 @@ function shewhartXbar(groups: number[][], useS: boolean, options: ControlChartOp
     const bar = meanOf(stats)
     sigma = options.sigma ?? (useS ? bar / c.c4 : bar / c.d2)
     // UCL = X̄ ± A₂ R̄ (or A₃ S̄)
-    ucl = center + (useS ? c.A3 * bar : c.A2 * bar)
-    lcl = center - (useS ? c.A3 * bar : c.A2 * bar)
+    ucl = center + 3 * sigma / Math.sqrt(n0)
+    lcl = center - 3 * sigma / Math.sqrt(n0)
     sigmas = (ucl as number - center) / 3
-    companionCenter = bar
-    companionUcl = (useS ? c.B4 : c.D4) * bar
-    companionLcl = (useS ? c.B3 : c.D3) * bar
+    companionCenter = sigma * (useS ? c.c4 : c.d2)
+    companionUcl = (useS ? c.B4 : c.D4) * companionCenter
+    companionLcl = (useS ? c.B3 : c.D3) * companionCenter
   } else {
     // Variable subgroup size: estimate pooled within sigma, then per-point limits
     let num = 0
@@ -416,7 +431,7 @@ function shewhartXbar(groups: number[][], useS: boolean, options: ControlChartOp
   const main = packPoints(means, center, ucl, lcl, sigmas, rules, ns)
   const companion = packPoints(
     stats,
-    companionCenter,
+    equal ? companionCenter : ns.map((ni) => sigma * (useS ? spcConstants(ni).c4 : spcConstants(ni).d2)),
     companionUcl,
     companionLcl,
     typeof companionUcl === 'number' ? (companionUcl - companionCenter) / 3 || 1 : companionUcl.map((u) => (u - (typeof companionLcl === 'number' ? companionCenter : companionCenter)) / 3 || 1),
@@ -499,7 +514,7 @@ function attributeChart(
     // Laney P′: inflate by σ_z from standardized residuals
     const z = p.map((pi, i) => (pi - pBar) / sigmaI[i]!)
     const mr = movingRanges(z)
-    const sigmaZ = meanOf(mr) / spcConstants(2).d2
+    const sigmaZ = options.sigmaZ ?? meanOf(mr) / spcConstants(2).d2
     const sig = sigmaI.map((s) => s * sigmaZ)
     const ucl = sig.map((s) => Math.min(1, pBar + 3 * s))
     const lcl = sig.map((s) => Math.max(0, pBar - 3 * s))
@@ -528,7 +543,7 @@ function attributeChart(
   }
   const z = u.map((ui, i) => (ui - uBar) / sigmaI[i]!)
   const mr = movingRanges(z)
-  const sigmaZ = meanOf(mr) / spcConstants(2).d2
+  const sigmaZ = options.sigmaZ ?? meanOf(mr) / spcConstants(2).d2
   const sig = sigmaI.map((s) => s * sigmaZ)
   const ucl = sig.map((s) => uBar + 3 * s)
   const lcl = sig.map((s) => Math.max(0, uBar - 3 * s))
@@ -546,9 +561,22 @@ export function controlChart(
 ): ControlChartResult {
   const type = options.type ?? (Array.isArray(x) && Array.isArray((x as number[][])[0]) ? 'xbar-r' : options.subgroup && options.subgroup >= 2 ? 'xbar-r' : 'i-mr')
 
+  if (options.mu !== undefined && !Number.isFinite(options.mu)) throw new RangeError('controlChart: mu must be finite')
+  if (options.sigma !== undefined && !(Number.isFinite(options.sigma) && options.sigma >= 0)) throw new RangeError('controlChart: sigma must be finite and non-negative')
+  if (options.center !== undefined && !Number.isFinite(options.center)) throw new RangeError('controlChart: center must be finite')
+  if (options.sigmaZ !== undefined && !(Number.isFinite(options.sigmaZ) && options.sigmaZ > 0)) throw new RangeError('controlChart: sigmaZ must be finite and positive')
   if (type === 'p' || type === 'np' || type === 'c' || type === 'u' || type === 'laney-p' || type === 'laney-u') {
-    const counts = Array.from(cleanNumbers(x as ArrayLike<number | null | undefined>))
-    const sizes = options.sizes ? Array.from(options.sizes) : undefined
+    const source = Array.from(x as ArrayLike<number | null | undefined>)
+    if (options.sizes && options.sizes.length !== source.length) throw new RangeError('controlChart: sizes must match input rows')
+    const keep = source.map((v, i) => typeof v === 'number' && Number.isFinite(v) ? i : -1).filter((i) => i >= 0)
+    const counts = keep.map((i) => source[i] as number)
+    const sizes = options.sizes ? keep.map((i) => options.sizes![i]!) : undefined
+    if (counts.some((c) => !Number.isSafeInteger(c) || c < 0)) throw new RangeError('controlChart: counts must be non-negative integers')
+    if (sizes?.some((n) => !Number.isFinite(n) || n <= 0)) throw new RangeError('controlChart: sizes must be finite and positive')
+    if (type === 'p' || type === 'np' || type === 'laney-p') {
+      if (sizes?.some((n, i) => !Number.isSafeInteger(n) || counts[i]! > n)) throw new RangeError('controlChart: binomial counts cannot exceed integer sizes')
+      if (options.center !== undefined && (options.center < 0 || options.center > (type === 'np' ? sizes?.[0] ?? 0 : 1))) throw new RangeError('controlChart: invalid binomial center')
+    } else if (options.center !== undefined && options.center < 0) throw new RangeError('controlChart: rate must be non-negative')
     return attributeChart(counts, sizes, type, options)
   }
 
@@ -582,7 +610,7 @@ export function ewma(
   options: { lambda?: number; L?: number; mu?: number; sigma?: number } = {},
 ): EwmaResult {
   const v = Array.from(cleanNumbers(x))
-  if (v.length < 2) throw new RangeError('ewma needs at least 2 observations')
+  if (v.length < 1 || (v.length < 2 && (options.mu === undefined || options.sigma === undefined))) throw new RangeError('ewma: need 2 observations, or 1 with known mu and sigma')
   const lambda = options.lambda ?? 0.2
   const L = options.L ?? 3
   if (!(lambda > 0 && lambda <= 1)) throw new RangeError(`ewma: lambda must be in (0, 1] (got ${lambda})`)
@@ -629,7 +657,7 @@ export function cusum(
   options: { k?: number; h?: number; mu?: number; sigma?: number; vMask?: boolean } = {},
 ): CusumResult {
   const v = Array.from(cleanNumbers(x))
-  if (v.length < 2) throw new RangeError('cusum needs at least 2 observations')
+  if (v.length < 1 || (v.length < 2 && (options.mu === undefined || options.sigma === undefined))) throw new RangeError('cusum: need 2 observations, or 1 with known mu and sigma')
   const k = options.k ?? 0.5
   const h = options.h ?? 5
   if (!(k >= 0)) throw new RangeError(`cusum: k must be ≥ 0 (got ${k})`)

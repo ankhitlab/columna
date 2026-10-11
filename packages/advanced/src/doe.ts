@@ -41,34 +41,32 @@ export function fullFactorial(factors: string[]): DoeDesign {
  * (letters map to factor indices in order). Resolution is inferred from the shortest word.
  */
 export function fractionalFactorial(factors: string[], generators: string[]): DoeDesign {
-  const k = factors.length
-  const p = generators.length
-  if (p < 1) throw new RangeError('fractionalFactorial: provide generators')
-  const basic = k - p
-  if (basic < 1) throw new RangeError('fractionalFactorial: too many generators')
-  const base = fullFactorialLevels(basic)
-  const letter = (ch: string) => {
-    const i = ch.toUpperCase().charCodeAt(0) - 65
-    if (i < 0 || i >= k) throw new RangeError(`fractionalFactorial: unknown letter ${ch}`)
-    return i
-  }
-  const runs = base.map((row) => {
-    const full = new Array(k).fill(0)
-    for (let j = 0; j < basic; j++) full[j] = row[j]!
-    for (let g = 0; g < p; g++) {
-      const word = generators[g]!.replace(/=/g, '')
-      // last letter is the generated factor; product of the preceding
-      const letters = [...word.toUpperCase()]
-      const genIdx = letter(letters[letters.length - 1]!)
-      let prod = 1
-      for (let i = 0; i < letters.length - 1; i++) prod *= full[letter(letters[i]!)]!
-      full[genIdx] = prod
-    }
-    return full
+  const k = factors.length, p = generators.length, basic = k - p
+  if (k < 2 || k > 12 || p < 1 || basic < 1) throw new RangeError('fractionalFactorial: need 2…12 factors and 1…k−1 independent generators')
+  if (new Set(factors).size !== k || factors.some((f) => !f.trim())) throw new RangeError('fractionalFactorial: factor names must be unique and non-empty')
+  const index = (s: string) => s.charCodeAt(0) - 65
+  const specs = generators.map((raw, g) => {
+    const s = raw.toUpperCase().replace(/\s/g, '')
+    let target: string, inputs: string
+    if (/^[A-L]=[A-L]+$/.test(s)) { target = s[0]!; inputs = s.slice(2) }
+    else if (/^[A-L]{2,}$/.test(s)) { target = s.at(-1)!; inputs = s.slice(0, -1) }
+    else throw new RangeError('fractionalFactorial: use D=ABC or ABCD; only positive generators supported')
+    const j = index(target), js = [...inputs].map(index)
+    if (j !== basic + g || js.some((i) => i < 0 || i >= j) || new Set(js).size !== js.length) throw new RangeError('fractionalFactorial: generated columns must be consecutive, with distinct previously defined input columns')
+    const mask = js.reduce((v, i) => v ^ (1 << i), 1 << j)
+    return { j, js, mask }
   })
-  // resolution = length of shortest word in generators (approx)
-  const res = Math.min(...generators.map((g) => g.replace(/=/g, '').length))
-  return { type: 'fractional-factorial', factors: factors.slice(), matrix: runs, info: { generators, resolution: res, runs: runs.length } }
+  const masks = [0]
+  for (const spec of specs) { const previous = masks.slice(); for (const m of previous) masks.push(m ^ spec.mask) }
+  if (new Set(masks).size !== (1 << p)) throw new RangeError('fractionalFactorial: dependent defining generators')
+  const word = (m: number) => factors.map((_, j) => m & (1 << j) ? String.fromCharCode(65 + j) : '').join('') || 'I'
+  const relation = masks.map(word).sort((a, b) => a === 'I' ? -1 : b === 'I' ? 1 : a.length - b.length || a.localeCompare(b))
+  const matrix = fullFactorialLevels(basic).map((row) => {
+    const out = row.slice()
+    for (const spec of specs) out[spec.j] = spec.js.reduce((v, j) => v * out[j]!, 1)
+    return out
+  })
+  return { type: 'fractional-factorial', factors: factors.slice(), matrix, info: { generators: generators.slice(), resolution: Math.min(...relation.filter((s) => s !== 'I').map((s) => s.length)), definingRelation: relation, runs: matrix.length } }
 }
 
 /** Plackett–Burman designs for n − 1 factors in n runs (n ≡ 0 mod 4, n ≤ 48). */
@@ -83,7 +81,7 @@ export function plackettBurman(factors: string[]): DoeDesign {
     12: [1, 1, -1, 1, 1, 1, -1, -1, -1, 1, -1],
     16: [1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1],
     20: [1, 1, -1, -1, 1, 1, 1, 1, -1, 1, -1, 1, -1, -1, -1, -1, 1, 1, -1],
-    24: [1, 1, 1, 1, 1, -1, 1, -1, 1, 1, -1, -1, 1, -1, -1, -1, -1, 1, 1, -1, 1, -1, -1],
+    24: Array.from({ length: 23 }, (_, j) => j === 0 || Array.from({ length: 22 }, (_, i) => ((i + 1) ** 2) % 23).includes(j) ? 1 : -1),
   }
   if (!(n in firstRows) && n !== 4) {
     // construct Hadamard-like cyclic for n=4: ++-
@@ -120,13 +118,15 @@ export function ccd(factors: string[], options: { alpha?: number | 'orthogonal' 
   if (k < 2 || k > 6) throw new RangeError('ccd: 2…6 factors')
   const cube = fullFactorialLevels(k)
   const centerPoints = options.centerPoints ?? 4
+  if (!Number.isInteger(centerPoints) || centerPoints < 0) throw new RangeError('ccd: centerPoints must be a nonnegative integer')
   let alpha: number
   if (options.alpha === undefined || options.alpha === 'rotatable') alpha = 2 ** (k / 4)
   else if (options.alpha === 'orthogonal') {
     const nF = 1 << k
     const nC = centerPoints
-    alpha = Math.sqrt(Math.sqrt(nF) * (Math.sqrt(nF + nC) - Math.sqrt(nF)))
+    alpha = Math.sqrt((Math.sqrt(nF * (nF + 2 * k + nC)) - nF) / 2)
   } else alpha = options.alpha
+  if (!(alpha > 0) || !Number.isFinite(alpha)) throw new RangeError('ccd: alpha must be positive and finite')
   const axial: number[][] = []
   for (let j = 0; j < k; j++) {
     const up = new Array(k).fill(0)

@@ -1,35 +1,28 @@
+import { createRequire } from 'node:module'
 import type { Column, TableView } from '@columna/arrow'
-import { isValid } from '@columna/arrow'
+import { getColumn, isValid, tableFromColumns, toRowObjects } from '@columna/arrow'
 
-function needsCsvEscape(s: string): boolean {
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i)
-    if (c === 34 || c === 44 || c === 10 || c === 13) return true
+/** Resolve CJS deps from ESM (`import.meta.url`) or from the tsup CJS build (`require`). */
+function syncNodeRequire(id: string): unknown {
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.url) {
+      return createRequire(import.meta.url)(id)
+    }
+  } catch {
+    /* fall through to CJS require */
   }
-  return false
+  // tsup CJS output has a free `require`; avoid referencing it as an identifier so ESM typecheck stays clean.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-eval
+  return (0, eval)('require')(id) as unknown
 }
 
-function escapeCsv(s: string): string {
-  // "" for an empty string: the reader maps a bare empty field to null, a quoted one to "" (polars convention)
-  if (s === '') return '""'
-  if (!needsCsvEscape(s)) return s
-  return `"${s.replace(/"/g, '""')}"`
+/** Project a table to named columns (order preserved). */
+export function projectTable(table: TableView, columns?: string[]): TableView {
+  if (!columns || columns.length === 0) return table
+  return tableFromColumns(columns.map((name) => getColumn(table, name)))
 }
 
-/**
- * Leading characters a spreadsheet interprets as a formula (OWASP CSV injection list: = + - @, tab, CR).
- * Only text cells are at risk; numeric columns are written as numbers and a leading "-" there is a sign.
- */
-const FORMULA_LEAD = /^[=+\-@\t\r]/
-
-/**
- * Neutralise a text cell for spreadsheet consumers: a leading formula trigger gets a "'" prefix (Excel /
- * LibreOffice / Sheets then treat the cell as text) and the cell is always quoted so the quote survives.
- */
-function escapeCsvSafe(s: string): string {
-  if (FORMULA_LEAD.test(s)) return `"'${s.replace(/"/g, '""')}"`
-  return escapeCsv(s)
-}
+// ───────────────────────────── CSV ─────────────────────────────
 
 export type CsvWriteOptions = {
   /**
@@ -38,6 +31,96 @@ export type CsvWriteOptions = {
    * it alters the data (pandas / polars do not do this either); turn it on for exports of untrusted text.
    */
   escapeFormulas?: boolean
+  /** Column separator (default `,`). Alias of `delimiter`. */
+  separator?: string
+  /** Alias of `separator` (pandas-style). */
+  delimiter?: string
+  /** Text encoding when writing files (default `utf-8`). Ignored by `toCsv()` string return. */
+  encoding?: string
+  /** Quote character (default `"`). */
+  quoteChar?: string
+  /** Write header row (default true). */
+  header?: boolean
+  /** Representation for null/missing (default `''`). pandas `na_rep`. */
+  naRep?: string
+  /** Decimal mark for numbers (default `.`). */
+  decimal?: string
+  /** Line terminator (default `\n`). pandas `lineterminator`. */
+  lineTerminator?: string
+  /** Subset of columns to write, in order. */
+  columns?: string[]
+}
+
+type ResolvedCsv = {
+  sep: string
+  quoteChar: string
+  header: boolean
+  naRep: string
+  decimal: string
+  lineTerminator: string
+  escapeFormulas: boolean
+  encoding: string
+}
+
+function resolveCsvOptions(options: CsvWriteOptions): ResolvedCsv {
+  const sep = options.separator ?? options.delimiter ?? ','
+  if (sep.length === 0) throw new RangeError('CSV separator must not be empty')
+  const quoteChar = options.quoteChar ?? '"'
+  if (quoteChar.length !== 1) throw new RangeError('CSV quoteChar must be a single character')
+  const decimal = options.decimal ?? '.'
+  if (decimal.length !== 1) throw new RangeError('CSV decimal must be a single character')
+  return {
+    sep,
+    quoteChar,
+    header: options.header !== false,
+    naRep: options.naRep ?? '',
+    decimal,
+    lineTerminator: options.lineTerminator ?? '\n',
+    escapeFormulas: Boolean(options.escapeFormulas),
+    encoding: options.encoding ?? 'utf-8',
+  }
+}
+
+function csvOptionsAreNativeDefaults(options: CsvWriteOptions, resolved: ResolvedCsv): boolean {
+  if (resolved.escapeFormulas) return false
+  if (resolved.sep !== ',' || resolved.quoteChar !== '"' || !resolved.header) return false
+  if (resolved.naRep !== '' || resolved.decimal !== '.' || resolved.lineTerminator !== '\n') return false
+  if (options.columns && options.columns.length > 0) return false
+  const enc = resolved.encoding.toLowerCase().replace('-', '')
+  if (enc !== 'utf8') return false
+  return true
+}
+
+function needsCsvEscape(s: string, sep: string, quoteChar: string): boolean {
+  if (s.includes(sep) || s.includes(quoteChar)) return true
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c === 10 || c === 13) return true
+  }
+  return false
+}
+
+function escapeCsv(s: string, sep: string, quoteChar: string): string {
+  // "" for an empty string: the reader maps a bare empty field to null, a quoted one to "" (polars convention)
+  if (s === '') return quoteChar + quoteChar
+  if (!needsCsvEscape(s, sep, quoteChar)) return s
+  const doubled = s.split(quoteChar).join(quoteChar + quoteChar)
+  return `${quoteChar}${doubled}${quoteChar}`
+}
+
+/**
+ * Leading characters a spreadsheet interprets as a formula (OWASP CSV injection list: = + - @, tab, CR).
+ * Only text cells are at risk; numeric columns are written as numbers and a leading "-" there is a sign.
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r]/
+
+function escapeCsvSafe(s: string, sep: string, quoteChar: string): string {
+  if (FORMULA_LEAD.test(s)) {
+    const body = `'` + s
+    const doubled = body.split(quoteChar).join(quoteChar + quoteChar)
+    return `${quoteChar}${doubled}${quoteChar}`
+  }
+  return escapeCsv(s, sep, quoteChar)
 }
 
 type NumArr = Float64Array | Float32Array | Int32Array | Uint32Array
@@ -106,10 +189,25 @@ function prepareWriter(col: Column, esc: (s: string) => string): ColWriter {
   return { kind: 'num', data, bm, dense, denseMin }
 }
 
+function formatNumber(v: number, decimal: string, sep: string, quoteChar: string): string {
+  let s: string
+  if (v >= 0 && v < SMALL_INT_STR.length && Number.isInteger(v)) s = SMALL_INT_STR[v]!
+  else s = String(v)
+  if (decimal !== '.' && s.includes('.')) s = s.replace('.', decimal)
+  if (needsCsvEscape(s, sep, quoteChar)) return escapeCsv(s, sep, quoteChar)
+  return s
+}
+
 /** Cell string for a single row index — used by the row-wise CSV emitter. */
-function cellAt(w: ColWriter, i: number, esc: (s: string) => string): string {
+function cellAt(
+  w: ColWriter,
+  i: number,
+  esc: (s: string) => string,
+  resolved: ResolvedCsv,
+  naOut: string,
+): string {
   const bm = w.bm
-  if (bm && !isValid(bm, i)) return ''
+  if (bm && !isValid(bm, i)) return naOut
   if (w.kind === 'utf8') {
     const s = w.data[i] ?? ''
     let e = w.cache.get(s)
@@ -119,28 +217,27 @@ function cellAt(w: ColWriter, i: number, esc: (s: string) => string): string {
     }
     return e
   }
-  if (w.kind === 'cat') return w.escaped[w.codes[i]!] ?? ''
+  if (w.kind === 'cat') return w.escaped[w.codes[i]!] ?? naOut
   if (w.kind === 'bool') return w.data[i] ? 'true' : 'false'
   const v = w.data[i]!
-  if (w.dense && Number.isInteger(v)) {
+  if (w.dense && Number.isInteger(v) && resolved.decimal === '.') {
     const o = v - w.denseMin
     if (o >= 0 && o < w.dense.length) return w.dense[o]!
   }
-  if (v >= 0 && v < SMALL_INT_STR.length && Number.isInteger(v)) return SMALL_INT_STR[v]!
-  return String(v)
+  return formatNumber(v, resolved.decimal, resolved.sep, resolved.quoteChar)
 }
 
 /** Rows per emitted chunk: bounds the working set alive at once. */
 export const CSV_CHUNK_ROWS = 32_768
 
 function needsQuoteInDict(s: string): boolean {
-  return needsCsvEscape(s)
+  return needsCsvEscape(s, ',', '"')
 }
 
 /** True when every text/category value is free of `,` `"` CR LF (safe for native unquoted write). */
 function tableIsUnquotedSafe(table: TableView): boolean {
   for (const col of table.columns) {
-    if (needsCsvEscape(col.field.name)) return false
+    if (needsQuoteInDict(col.field.name)) return false
     const dtype = col.field.dtype
     if (dtype === 'utf8') {
       for (const s of col.data as string[]) {
@@ -192,7 +289,8 @@ function toNativeWriteColumns(table: TableView): NativeWriteCol[] {
 }
 
 async function tryWriteCsvNative(table: TableView, path: string, options: CsvWriteOptions): Promise<boolean> {
-  if (options.escapeFormulas) return false
+  const resolved = resolveCsvOptions(options)
+  if (!csvOptionsAreNativeDefaults(options, resolved)) return false
   if (!tableIsUnquotedSafe(table)) return false
   try {
     const id = '@columna/' + 'native'
@@ -208,18 +306,38 @@ async function tryWriteCsvNative(table: TableView, path: string, options: CsvWri
   }
 }
 
+function joinCells(parts: string[], sep: string): string {
+  return parts.join(sep)
+}
+
 /**
  * Serialize a table to CSV as a sequence of chunks (header first, then blocks of rows). Cells are
  * formatted row-wise (no ncols × chunk temporary string grid), so `writeCsv(path)` streams with memory
  * bounded by the chunk, not the table.
  */
 export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {}): Generator<string, void, undefined> {
-  const n = table.numRows
-  const cols = table.columns
+  const resolved = resolveCsvOptions(options)
+  const view = projectTable(table, options.columns)
+  const n = view.numRows
+  const cols = view.columns
   const ncols = cols.length
-  const esc = options.escapeFormulas ? escapeCsvSafe : escapeCsv
-  yield cols.map((c) => esc(c.field.name)).join(',')
+  const { sep, quoteChar } = resolved
+  const esc = (s: string) =>
+    resolved.escapeFormulas ? escapeCsvSafe(s, sep, quoteChar) : escapeCsv(s, sep, quoteChar)
+  const naOut = resolved.naRep === '' ? '' : esc(resolved.naRep)
+
+  if (resolved.header) {
+    yield cols.map((c) => esc(c.field.name)).join(sep)
+  }
   if (n === 0) return
+  if (ncols === 0) {
+    for (let start = 0; start < n; start += CSV_CHUNK_ROWS) {
+      const len = Math.min(n, start + CSV_CHUNK_ROWS) - start
+      yield new Array(len).fill('').join(resolved.lineTerminator)
+    }
+    return
+  }
+
   const writers = cols.map((c) => prepareWriter(c, esc))
   const chunk = new Array<string>(CSV_CHUNK_ROWS)
   for (let start = 0; start < n; start += CSV_CHUNK_ROWS) {
@@ -227,13 +345,13 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
     const len = end - start
     if (ncols === 1) {
       const w0 = writers[0]!
-      for (let i = 0; i < len; i++) chunk[i] = cellAt(w0, start + i, esc)
+      for (let i = 0; i < len; i++) chunk[i] = cellAt(w0, start + i, esc, resolved, naOut)
     } else if (ncols === 2) {
       const w0 = writers[0]!
       const w1 = writers[1]!
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)}`
+        chunk[i] = joinCells([cellAt(w0, r, esc, resolved, naOut), cellAt(w1, r, esc, resolved, naOut)], sep)
       }
     } else if (ncols === 3) {
       const w0 = writers[0]!
@@ -241,20 +359,39 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
       const w2 = writers[2]!
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)}`
+        chunk[i] = joinCells(
+          [cellAt(w0, r, esc, resolved, naOut), cellAt(w1, r, esc, resolved, naOut), cellAt(w2, r, esc, resolved, naOut)],
+          sep,
+        )
       }
     } else if (ncols === 4) {
       const [w0, w1, w2, w3] = writers as [ColWriter, ColWriter, ColWriter, ColWriter]
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] = `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)}`
+        chunk[i] = joinCells(
+          [
+            cellAt(w0, r, esc, resolved, naOut),
+            cellAt(w1, r, esc, resolved, naOut),
+            cellAt(w2, r, esc, resolved, naOut),
+            cellAt(w3, r, esc, resolved, naOut),
+          ],
+          sep,
+        )
       }
     } else if (ncols === 5) {
       const [w0, w1, w2, w3, w4] = writers as [ColWriter, ColWriter, ColWriter, ColWriter, ColWriter]
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] =
-          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)}`
+        chunk[i] = joinCells(
+          [
+            cellAt(w0, r, esc, resolved, naOut),
+            cellAt(w1, r, esc, resolved, naOut),
+            cellAt(w2, r, esc, resolved, naOut),
+            cellAt(w3, r, esc, resolved, naOut),
+            cellAt(w4, r, esc, resolved, naOut),
+          ],
+          sep,
+        )
       }
     } else if (ncols === 6) {
       const [w0, w1, w2, w3, w4, w5] = writers as [
@@ -267,8 +404,17 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
       ]
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] =
-          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)}`
+        chunk[i] = joinCells(
+          [
+            cellAt(w0, r, esc, resolved, naOut),
+            cellAt(w1, r, esc, resolved, naOut),
+            cellAt(w2, r, esc, resolved, naOut),
+            cellAt(w3, r, esc, resolved, naOut),
+            cellAt(w4, r, esc, resolved, naOut),
+            cellAt(w5, r, esc, resolved, naOut),
+          ],
+          sep,
+        )
       }
     } else if (ncols === 7) {
       const [w0, w1, w2, w3, w4, w5, w6] = writers as [
@@ -282,8 +428,18 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
       ]
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] =
-          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)},${cellAt(w6, r, esc)}`
+        chunk[i] = joinCells(
+          [
+            cellAt(w0, r, esc, resolved, naOut),
+            cellAt(w1, r, esc, resolved, naOut),
+            cellAt(w2, r, esc, resolved, naOut),
+            cellAt(w3, r, esc, resolved, naOut),
+            cellAt(w4, r, esc, resolved, naOut),
+            cellAt(w5, r, esc, resolved, naOut),
+            cellAt(w6, r, esc, resolved, naOut),
+          ],
+          sep,
+        )
       }
     } else if (ncols === 8) {
       const [w0, w1, w2, w3, w4, w5, w6, w7] = writers as [
@@ -298,31 +454,70 @@ export function* tableToCsvChunks(table: TableView, options: CsvWriteOptions = {
       ]
       for (let i = 0; i < len; i++) {
         const r = start + i
-        chunk[i] =
-          `${cellAt(w0, r, esc)},${cellAt(w1, r, esc)},${cellAt(w2, r, esc)},${cellAt(w3, r, esc)},${cellAt(w4, r, esc)},${cellAt(w5, r, esc)},${cellAt(w6, r, esc)},${cellAt(w7, r, esc)}`
+        chunk[i] = joinCells(
+          [
+            cellAt(w0, r, esc, resolved, naOut),
+            cellAt(w1, r, esc, resolved, naOut),
+            cellAt(w2, r, esc, resolved, naOut),
+            cellAt(w3, r, esc, resolved, naOut),
+            cellAt(w4, r, esc, resolved, naOut),
+            cellAt(w5, r, esc, resolved, naOut),
+            cellAt(w6, r, esc, resolved, naOut),
+            cellAt(w7, r, esc, resolved, naOut),
+          ],
+          sep,
+        )
       }
     } else {
       for (let i = 0; i < len; i++) {
         const r = start + i
-        let row = cellAt(writers[0]!, r, esc)
-        for (let c = 1; c < ncols; c++) row += `,${cellAt(writers[c]!, r, esc)}`
+        let row = cellAt(writers[0]!, r, esc, resolved, naOut)
+        for (let c = 1; c < ncols; c++) row += sep + cellAt(writers[c]!, r, esc, resolved, naOut)
         chunk[i] = row
       }
     }
-    yield chunk.length === len ? chunk.join('\n') : chunk.slice(0, len).join('\n')
+    yield chunk.length === len
+      ? chunk.join(resolved.lineTerminator)
+      : chunk.slice(0, len).join(resolved.lineTerminator)
   }
 }
 
 /** Serialize a table to CSV text. For files prefer `writeCsvText(path)`, which streams the chunks. */
 export function tableToCsv(table: TableView, options: CsvWriteOptions = {}): string {
+  const lt = resolveCsvOptions(options).lineTerminator
   const parts: string[] = []
   for (const chunk of tableToCsvChunks(table, options)) parts.push(chunk)
-  return parts.join('\n')
+  return parts.join(lt)
 }
 
-async function writeNodeFile(path: string, data: string | Uint8Array): Promise<void> {
+async function writeNodeFile(path: string, data: string | Uint8Array, encoding?: string): Promise<void> {
   const fs = await import('node:fs/promises')
-  await fs.writeFile(path, data)
+  if (typeof data === 'string' && encoding) {
+    await fs.writeFile(path, data, { encoding: nodeBufferEncoding(encoding) })
+  } else {
+    await fs.writeFile(path, data)
+  }
+}
+
+function nodeBufferEncoding(encoding: string): BufferEncoding {
+  const key = encoding.toLowerCase().replace(/_/g, '-')
+  const map: Record<string, BufferEncoding> = {
+    'utf-8': 'utf8',
+    utf8: 'utf8',
+    'utf-16le': 'utf16le',
+    utf16le: 'utf16le',
+    ucs2: 'utf16le',
+    'ucs-2': 'utf16le',
+    latin1: 'latin1',
+    binary: 'latin1',
+    ascii: 'ascii',
+    hex: 'hex',
+    base64: 'base64',
+    'base64url': 'base64url' as BufferEncoding,
+  }
+  const enc = map[key]
+  if (!enc) throw new Error(`Unsupported CSV/JSON encoding: ${encoding}`)
+  return enc
 }
 
 /**
@@ -332,8 +527,10 @@ async function writeNodeFile(path: string, data: string | Uint8Array): Promise<v
 export async function writeCsvText(table: TableView, path?: string, options: CsvWriteOptions = {}): Promise<string> {
   if (!path) return tableToCsv(table, options)
   if (await tryWriteCsvNative(table, path, options)) return ''
+  const resolved = resolveCsvOptions(options)
+  const enc = nodeBufferEncoding(resolved.encoding)
   const fs = await import('node:fs')
-  const out = fs.createWriteStream(path)
+  const out = fs.createWriteStream(path, { encoding: enc })
   let rejectWrite: ((err: Error) => void) | null = null
   const onError = (err: Error) => {
     if (rejectWrite) rejectWrite(err)
@@ -355,7 +552,7 @@ export async function writeCsvText(table: TableView, path?: string, options: Csv
   try {
     let first = true
     for (const chunk of tableToCsvChunks(table, options)) {
-      await write(first ? chunk : '\n' + chunk)
+      await write(first ? chunk : resolved.lineTerminator + chunk)
       first = false
     }
     await new Promise<void>((resolve, reject) => {
@@ -375,16 +572,31 @@ export async function writeCsvText(table: TableView, path?: string, options: Csv
   return ''
 }
 
+// ───────────────────────────── Parquet ─────────────────────────────
+
+export type ParquetWriteOptions = {
+  columns?: string[]
+  /** Default `SNAPPY`. `GZIP` uses Node `zlib` (Node only). */
+  codec?: 'SNAPPY' | 'UNCOMPRESSED' | 'GZIP'
+  rowGroupSize?: number | number[]
+  statistics?: boolean
+}
+
+export type ParquetLikeWriteOptions = {
+  columns?: string[]
+}
+
 /** Minimal parquet-like JSON payload (same as `@columna/wasm` writeParquetLike).
  *  This is NOT Apache Parquet — use {@link writeParquetLikeBytes} / `writeParquetLike`. */
-export function tableToParquetLike(table: TableView): Uint8Array {
+export function tableToParquetLike(table: TableView, options: ParquetLikeWriteOptions = {}): Uint8Array {
+  const view = projectTable(table, options.columns)
   const payload = {
     format: 'columna-parquet-like-v1',
-    numRows: table.numRows,
-    schema: table.schema,
-    columns: table.columns.map((c) => {
+    numRows: view.numRows,
+    schema: view.schema,
+    columns: view.columns.map((c) => {
       const values: Array<number | string | boolean | null> = []
-      for (let i = 0; i < table.numRows; i++) {
+      for (let i = 0; i < view.numRows; i++) {
         if (!isValid(c.nullBitmap, i)) values.push(null)
         else {
           const dtype = c.field.dtype
@@ -402,8 +614,12 @@ export function tableToParquetLike(table: TableView): Uint8Array {
 }
 
 /** Write the custom JSON "parquet-like" format (round-trips with `readParquetLike`). */
-export async function writeParquetLikeBytes(table: TableView, path?: string): Promise<Uint8Array> {
-  const bytes = tableToParquetLike(table)
+export async function writeParquetLikeBytes(
+  table: TableView,
+  path?: string,
+  options: ParquetLikeWriteOptions = {},
+): Promise<Uint8Array> {
+  const bytes = tableToParquetLike(table, options)
   if (path) await writeNodeFile(path, bytes)
   return bytes
 }
@@ -501,15 +717,183 @@ export function tableToParquetColumnData(
   })
 }
 
+/** Sync Apache Parquet bytes (hyparquet-writer). Uses `createRequire` for CJS deps. */
+export function tableToParquetBytes(table: TableView, options: ParquetWriteOptions = {}): Uint8Array {
+  const { parquetWriteBuffer } = syncNodeRequire('hyparquet-writer') as typeof import('hyparquet-writer')
+  const view = projectTable(table, options.columns)
+  const columnData = tableToParquetColumnData(view)
+  const codec = options.codec ?? 'SNAPPY'
+  const writeOpts: {
+    columnData: typeof columnData
+    codec: typeof codec
+    rowGroupSize?: number | number[]
+    statistics?: boolean
+    compressors?: Record<string, (input: Uint8Array) => Uint8Array>
+  } = { columnData, codec }
+  if (options.rowGroupSize !== undefined) writeOpts.rowGroupSize = options.rowGroupSize
+  if (options.statistics !== undefined) writeOpts.statistics = options.statistics
+  if (codec === 'GZIP') {
+    const { gzipSync } = syncNodeRequire('node:zlib') as typeof import('node:zlib')
+    writeOpts.compressors = { GZIP: (u: Uint8Array) => gzipSync(u) }
+  }
+  const ab = parquetWriteBuffer(writeOpts)
+  return new Uint8Array(ab)
+}
+
 /**
  * Write Apache Parquet (via hyparquet-writer). Round-trips with {@link DataFrame.readParquet}.
  * Default codec is SNAPPY.
  */
-export async function writeParquetBytes(table: TableView, path?: string): Promise<Uint8Array> {
+export async function writeParquetBytes(
+  table: TableView,
+  path?: string,
+  options: ParquetWriteOptions = {},
+): Promise<Uint8Array> {
   const { parquetWriteBuffer } = await import('hyparquet-writer')
-  const columnData = tableToParquetColumnData(table)
-  const ab = parquetWriteBuffer({ columnData, codec: 'SNAPPY' })
+  const view = projectTable(table, options.columns)
+  const columnData = tableToParquetColumnData(view)
+  const codec = options.codec ?? 'SNAPPY'
+  const writeOpts: Parameters<typeof parquetWriteBuffer>[0] = { columnData, codec }
+  if (options.rowGroupSize !== undefined) writeOpts.rowGroupSize = options.rowGroupSize
+  if (options.statistics !== undefined) writeOpts.statistics = options.statistics
+  if (codec === 'GZIP') {
+    const { gzipSync } = await import('node:zlib')
+    writeOpts.compressors = { GZIP: (u: Uint8Array) => gzipSync(u) }
+  }
+  const ab = parquetWriteBuffer(writeOpts)
   const bytes = new Uint8Array(ab)
+  if (path) await writeNodeFile(path, bytes)
+  return bytes
+}
+
+// ───────────────────────────── JSON ─────────────────────────────
+
+export type JsonWriteOptions = {
+  /** `records` (default), `columns`, `values`, or `lines` (NDJSON). */
+  orient?: 'records' | 'columns' | 'values' | 'lines'
+  /** Alias of `orient: 'lines'`. */
+  lines?: boolean
+  columns?: string[]
+  /** File encoding for `writeJson(path)` (default `utf-8`). */
+  encoding?: string
+  /** Pretty-print indent; default `null` (compact). Ignored for `lines`. */
+  indent?: number | null
+}
+
+function cellJson(table: TableView, colIdx: number, row: number): unknown {
+  const col = table.columns[colIdx]!
+  if (!isValid(col.nullBitmap, row)) return null
+  const dtype = col.field.dtype
+  if (dtype === 'utf8') return (col.data as string[])[row] ?? null
+  if (dtype === 'bool') return Boolean((col.data as Uint8Array)[row])
+  if (dtype === 'category' && col.dictionary) {
+    return col.dictionary[(col.data as Uint32Array)[row]!] ?? null
+  }
+  return Number((col.data as Float64Array | Int32Array | Uint32Array | Float32Array)[row]!)
+}
+
+export function tableToJson(table: TableView, options: JsonWriteOptions = {}): string {
+  const view = projectTable(table, options.columns)
+  const linesMode = options.lines === true || options.orient === 'lines'
+  const orient = linesMode ? 'lines' : (options.orient ?? 'records')
+  const indent = options.indent ?? null
+  const space = indent == null ? undefined : indent
+
+  if (orient === 'lines') {
+    const rows = toRowObjects(view)
+    return rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : '')
+  }
+  if (orient === 'records') {
+    return JSON.stringify(toRowObjects(view), null, space)
+  }
+  if (orient === 'columns') {
+    const obj: Record<string, unknown[]> = {}
+    for (let c = 0; c < view.columns.length; c++) {
+      const name = view.schema[c]!.name
+      const values: unknown[] = new Array(view.numRows)
+      for (let i = 0; i < view.numRows; i++) values[i] = cellJson(view, c, i)
+      obj[name] = values
+    }
+    return JSON.stringify(obj, null, space)
+  }
+  if (orient === 'values') {
+    const matrix: unknown[][] = new Array(view.numRows)
+    for (let i = 0; i < view.numRows; i++) {
+      const row: unknown[] = new Array(view.columns.length)
+      for (let c = 0; c < view.columns.length; c++) row[c] = cellJson(view, c, i)
+      matrix[i] = row
+    }
+    return JSON.stringify(matrix, null, space)
+  }
+  throw new Error(`Unsupported JSON orient: ${String(orient)}`)
+}
+
+export async function writeJsonText(
+  table: TableView,
+  path?: string,
+  options: JsonWriteOptions = {},
+): Promise<string> {
+  const text = tableToJson(table, options)
+  if (!path) return text
+  await writeNodeFile(path, text, options.encoding ?? 'utf-8')
+  return ''
+}
+
+// ───────────────────────────── Excel ─────────────────────────────
+
+export type ExcelWriteOptions = {
+  /** Sheet name or 0-based index when replacing (default `'Sheet1'`). */
+  sheet?: string | number
+  /** Alias of `sheet`. */
+  sheetName?: string | number
+  columns?: string[]
+  /** Write header row (default true). */
+  header?: boolean
+}
+
+export async function tableToExcelBytes(table: TableView, options: ExcelWriteOptions = {}): Promise<Uint8Array> {
+  const XLSX = await import('xlsx')
+  const view = projectTable(table, options.columns)
+  const header = options.header !== false
+  const names = view.schema.map((f) => f.name)
+  const aoa: unknown[][] = []
+  if (header) aoa.push(names)
+  for (let i = 0; i < view.numRows; i++) {
+    const row: unknown[] = new Array(names.length)
+    for (let c = 0; c < view.columns.length; c++) {
+      const col = view.columns[c]!
+      if (!isValid(col.nullBitmap, i)) {
+        row[c] = null
+        continue
+      }
+      const dtype = col.field.dtype
+      if (dtype === 'utf8') row[c] = (col.data as string[])[i]!
+      else if (dtype === 'bool') row[c] = Boolean((col.data as Uint8Array)[i])
+      else if (dtype === 'category' && col.dictionary) {
+        row[c] = col.dictionary[(col.data as Uint32Array)[i]!] ?? null
+      } else if (dtype === 'datetime') {
+        row[c] = new Date(Number((col.data as Float64Array)[i]!))
+      } else {
+        row[c] = Number((col.data as Float64Array | Int32Array | Uint32Array | Float32Array)[i]!)
+      }
+    }
+    aoa.push(row)
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa)
+  const wb = XLSX.utils.book_new()
+  const sheetRef = options.sheetName ?? options.sheet ?? 'Sheet1'
+  const sheetName = typeof sheetRef === 'number' ? `Sheet${sheetRef + 1}` : String(sheetRef)
+  XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array
+  return buf instanceof Uint8Array ? buf : new Uint8Array(buf)
+}
+
+export async function writeExcelBytes(
+  table: TableView,
+  path?: string,
+  options: ExcelWriteOptions = {},
+): Promise<Uint8Array> {
+  const bytes = await tableToExcelBytes(table, options)
   if (path) await writeNodeFile(path, bytes)
   return bytes
 }

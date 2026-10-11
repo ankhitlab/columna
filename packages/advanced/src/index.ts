@@ -376,3 +376,35 @@ export { ridge, lasso, elasticNet, quantileRegression, type PenalizedResult } fr
 export { dbscan, pdist, cdist, type DbscanResult } from './cluster2.js'
 export { welchPsd, savitzkyGolay, type WelchPsdResult } from './signal2.js'
 export { brentq, trapz, simpson } from './numerics.js'
+
+// Proposed process-quality APIs (source-aligned gaps / fixed baseline).
+export { processControlChart, processCapability, withinEstimate, qualityMoments, qualityMovingRanges, attributeCapability, normalQQ, qualityHistogram, type QualityRaw, type QualityOptions, type QualityPoint, type QualityChart, type WithinEstimate } from './process-quality.js'
+export { proportionInterval, poissonRateInterval } from './basic.js'
+export { histogramBins, meanInterval } from './descriptive.js'
+
+// Proposed fixed-effects modelling / comparison API (local patch).
+export { linearModelVector, linearModelContrast, predictLinearModel } from './lm.js'
+export { linearWorkbench, compareLinearMeans, adjustComparisonP, welchOneWay, gamesHowellWorkbench } from './linear-workbench.js'
+export type { ComparisonMethod, LinearComparison, LinearMeansResult, LinearWorkbenchOptions } from './linear-workbench.js'
+
+export {contingencyAnalysis,goodnessOfFitAnalysis,fisherExact2x2,wilsonInterval,newcombeInterval,proportionAnalysis,varianceSummaryAnalysis,varianceAnalysis,crossTabulate,binarySample} from './inference-workbench.js'
+export type {BinomialSample,VarianceSample} from './inference-workbench.js'
+export {powerStudy,POWER_TESTS} from './power.js'
+
+// Proposed engineering workflows, with validated native-library calculations.
+export {engineeringStudy,doeStudy,msaStudy,timeSeriesStudy,reliabilityStudy,multivariateStudy} from './engineering-workbench.js'
+export type {EngineeringCell,EngineeringDomain,EngineeringInput,EngineeringTable,EngineeringPlot,EngineeringResult} from './engineering-workbench.js'
+
+// Proposed typed worksheet expressions: closed AST, stable IDs and native Columna calculations.
+export {worksheetDate,worksheetDateText,compileWorksheetExpression,worksheetReferences,worksheetExpressionText,worksheetAggregate,evaluateWorksheetExpression,recalculateWorksheet,worksheetMatrix} from './worksheet-calc.js'
+export type {WorksheetValue,WorksheetType,WorksheetColumn,WorksheetConstant,WorksheetData,WorksheetExpression} from './worksheet-calc.js'
+
+// Proposed extended quality: fitted-distribution tails, Between/Within and isolated SPC stages.
+export {fitCapabilityDistribution,nonnormalCapability,betweenWithinCapability,stagedControlChart} from './extended-quality.js'
+
+// Proposed random-intercept REML; not the EMS/ANOVA estimator used by Minitab Expanded.
+export {varianceComponentREML,expandedGageRR} from './expanded-gage.js'
+
+// Statistical data for presentation; no rendering or executable user expressions.
+export {graphWorkbench} from './graph-workbench.js'
+export type {GraphCell,VizPoint,VizChart,GraphInput} from './graph-workbench.js'

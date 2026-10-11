@@ -313,7 +313,8 @@ export function friedman(table: number[][], treatmentNames?: string[]): Friedman
   for (let j = 0; j < k; j++) s += sumRanks[j]! * sumRanks[j]!
   const sUnadjusted = (12 / (b * k * (k + 1))) * s - 3 * b * (k + 1)
   const correction = 1 - tieSum / (b * k * (k * k - 1))
-  const statistic = correction > 0 ? sUnadjusted / correction : NaN
+  if (!(correction > 0)) throw new RangeError('friedman: no within-block rank variation')
+  const statistic = sUnadjusted / correction
   const df = k - 1
   const treatments = Array.from({ length: k }, (_, j) => {
     const col = Float64Array.from(table, (row) => row[j]!).sort()

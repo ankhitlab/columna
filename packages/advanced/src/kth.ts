@@ -36,8 +36,9 @@ export function kthPairSum(a: Float64Array, b: Float64Array, k: number): number 
   let lo = a[0]! + b[0]!
   let hi = a[a.length - 1]! + b[b.length - 1]!
   if (countSums(a, b, lo) >= k) return lo
-  for (let it = 0; it < 200 && hi - lo > 1e-9 * (Math.abs(lo) + Math.abs(hi) + 1); it++) {
-    const mid = 0.5 * (lo + hi)
+  for (let it = 0; it < 1100; it++) {
+    const mid = 0.5 * lo + 0.5 * hi
+    if (mid <= lo || mid >= hi) break
     if (countSums(a, b, mid) >= k) hi = mid
     else lo = mid
   }
@@ -76,8 +77,9 @@ export function kthWalshAverage(x: Float64Array, k: number): number {
   let lo = 2 * x[0]!
   let hi = 2 * x[n - 1]!
   if (countWalsh(x, lo) >= k) return lo / 2
-  for (let it = 0; it < 200 && hi - lo > 1e-9 * (Math.abs(lo) + Math.abs(hi) + 1); it++) {
-    const mid = 0.5 * (lo + hi)
+  for (let it = 0; it < 1100; it++) {
+    const mid = 0.5 * lo + 0.5 * hi
+    if (mid <= lo || mid >= hi) break
     if (countWalsh(x, mid) >= k) hi = mid
     else lo = mid
   }

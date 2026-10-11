@@ -573,3 +573,23 @@ export function causeAndEffect(spec: { effect: string; categories: Record<string
 function escapeXml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
 }
+
+/** Equal-width histogram without requiring a normality test or N >= 8. */
+export function histogramBins(x: ArrayLike<number | null | undefined>, bins = 10): Array<{ from: number; to: number; count: number }> {
+  if (!Number.isSafeInteger(bins) || bins < 2) throw new RangeError('histogramBins: bins must be an integer >= 2')
+  const v = cleanNumbers(x), stats = describeOne(v)
+  const lo = stats.range ? stats.min : stats.min - 0.5
+  const hi = stats.range ? stats.max : stats.max + 0.5
+  const width = (hi - lo) / bins
+  const result = Array.from({ length: bins }, (_, i) => ({ from: lo + i * width, to: lo + (i + 1) * width, count: 0 }))
+  for (const value of v) result[Math.max(0, Math.min(bins - 1, Math.floor((value - lo) / width)))]!.count++
+  return result
+}
+/** Mean confidence interval, defined for constant nonempty data as well. */
+export function meanInterval(x: ArrayLike<number | null | undefined>, confidence = 0.95): [number, number] {
+  if (!(confidence > 0 && confidence < 1)) throw new RangeError('meanInterval: confidence must be in (0, 1)')
+  const s = describeOne(x)
+  if (s.n < 2) return [NaN, NaN]
+  const half = tDist(s.n - 1).ppf(0.5 + confidence / 2) * s.seMean
+  return [s.mean - half, s.mean + half]
+}

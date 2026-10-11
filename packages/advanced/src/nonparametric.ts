@@ -113,6 +113,7 @@ export function mannWhitney(
   for (let i = 0; i < n1; i++) W += ranks[i]!
   const U1 = W - (n1 * (n1 + 1)) / 2
   const N = n1 + n2
+  if (tieSum >= N * N * N - N) throw new RangeError('mannWhitney: all observations are identical')
 
   let method: 'exact' | 'asymptotic' = options.method === 'exact' ? 'exact' : 'asymptotic'
   if ((options.method ?? 'auto') === 'auto' && !ties && n1 * n2 <= 2500) method = 'exact'
@@ -227,7 +228,8 @@ export function kruskal(
   }
   const hUnadjusted = (12 / (N * (N + 1))) * h - 3 * (N + 1)
   const correction = 1 - tieSum / (N * N * N - N)
-  const statistic = correction > 0 ? hUnadjusted / correction : NaN
+  if (!(correction > 0)) throw new RangeError('kruskal: all observations are identical')
+  const statistic = hUnadjusted / correction
   const df = k - 1
   return { test: 'Kruskal-Wallis', statistic, hUnadjusted, df, pValue: chi2Dist(df).sf(statistic), n: N, groups: out }
 }

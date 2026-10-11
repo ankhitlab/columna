@@ -5,7 +5,11 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'node',
-    include: ['packages/**/src/**/*.test.ts', 'packages/**/tests/**/*.test.ts'],
+    include: [
+      'packages/**/src/**/*.test.ts',
+      'packages/**/tests/**/*.test.ts',
+      'packages/**/tests/**/*.test.js',
+    ],
     // the Arrow interop suite has its own config + dependency (pnpm test:interop)
     exclude: ['**/node_modules/**', 'packages/arrow-interop/**'],
     coverage: {

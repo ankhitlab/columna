@@ -263,7 +263,30 @@ export interface LstsqResult {
  * Least squares y ≈ X β via QR. Dependent columns get coefficient 0 and are removed from
  * (XᵀX)⁻¹; the remaining columns are refitted so the result is a proper least-squares solution.
  */
+/** Column equilibration makes rank decisions independent of measurement units.
+ * Positive rescaling preserves design order / sequential SS. No normal equations are solved. */
 export function lstsq(X: Matrix, y: ArrayLike<number>, tol = 1e-10): LstsqResult {
+  if (y.length !== X.rows || !(tol > 0 && Number.isFinite(tol))) throw new RangeError('lstsq: invalid response length or tolerance')
+  const scales = new Float64Array(X.cols)
+  const scaled = matrix(X.rows, X.cols)
+  for (let j = 0; j < X.cols; j++) {
+    let a = 0
+    for (let i = 0; i < X.rows; i++) {
+      const v = X.data[i * X.cols + j]!
+      if (!Number.isFinite(v)) throw new RangeError('lstsq: design must be finite')
+      a = Math.max(a, Math.abs(v))
+    }
+    scales[j] = a || 1
+    for (let i = 0; i < X.rows; i++) scaled.data[i * X.cols + j] = X.data[i * X.cols + j]! / scales[j]!
+  }
+  for (let i = 0; i < y.length; i++) if (!Number.isFinite(y[i])) throw new RangeError('lstsq: response must be finite')
+  const fit = lstsqUnscaled(scaled, y, tol)
+  for (let j = 0; j < X.cols; j++) fit.coef[j] /= scales[j]!
+  for (let j = 0; j < X.cols; j++) for (let k = 0; k < X.cols; k++) fit.xtxInv.data[j * X.cols + k] = fit.xtxInv.data[j * X.cols + k]! / scales[j]! / scales[k]!
+  return fit
+}
+
+function lstsqUnscaled(X: Matrix, y: ArrayLike<number>, tol = 1e-10): LstsqResult {
   const n = X.rows
   const p = X.cols
   const full = qr(X, tol)

@@ -26,7 +26,14 @@ export { dt, daysBetween } from './datetime.js'
 export { Session, createSession, type SessionOptions } from './session.js'
 export { openSqlClient, setIoPolicy, getIoPolicy, io } from './io/index.js'
 export type { IoPolicy, IoLoadOptions, IoSourceMode } from './io/types.js'
-export type { CsvWriteOptions } from './io/write.js'
+export type {
+  CsvWriteOptions,
+  ParquetWriteOptions,
+  ParquetLikeWriteOptions,
+  JsonWriteOptions,
+  ExcelWriteOptions,
+} from './io/write.js'
+export type { PresentWriteOptions } from './io/present.js'
 export type { ArrowLike, ArrowIpcWriteOptions, DType, Schema, TableView } from '@columna/arrow'
 export { toArrowIpc, fromArrowIpc, PrecisionLossError } from '@columna/arrow'
 export type { ArrowIpcReadOptions, Int64Policy } from '@columna/arrow'

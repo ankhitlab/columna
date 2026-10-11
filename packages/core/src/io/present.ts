@@ -1,41 +1,71 @@
 import type { Column, TableView } from '@columna/arrow'
-import { isValid } from '@columna/arrow'
+import { getColumn, isValid, tableFromColumns } from '@columna/arrow'
 
-function cellAt(table: TableView, colIdx: number, row: number): string {
+export type PresentWriteOptions = {
+  /** Max data rows to render (markdown default 50, HTML default 100). */
+  maxRows?: number
+  /** Subset of columns to render, in order. */
+  columns?: string[]
+  /** Representation for null/missing (default `''`). */
+  naRep?: string
+}
+
+function resolvePresent(
+  arg: number | PresentWriteOptions | undefined,
+  defaultMaxRows: number,
+): { maxRows: number; columns?: string[]; naRep: string } {
+  if (typeof arg === 'number') return { maxRows: arg, naRep: '' }
+  return {
+    maxRows: arg?.maxRows ?? defaultMaxRows,
+    columns: arg?.columns,
+    naRep: arg?.naRep ?? '',
+  }
+}
+
+function projectPresent(table: TableView, columns?: string[]): TableView {
+  if (!columns || columns.length === 0) return table
+  return tableFromColumns(columns.map((name) => getColumn(table, name)))
+}
+
+function cellAt(table: TableView, colIdx: number, row: number, naRep = ''): string {
   const col = table.columns[colIdx]!
-  if (!isValid(col.nullBitmap, row)) return ''
+  if (!isValid(col.nullBitmap, row)) return naRep
   const dtype = col.field.dtype
   if (dtype === 'utf8') return (col.data as string[])[row] ?? ''
   if (dtype === 'bool') return (col.data as Uint8Array)[row] ? 'true' : 'false'
   if (dtype === 'category' && col.dictionary) {
-    return col.dictionary[(col.data as Uint32Array)[row]!] ?? ''
+    return col.dictionary[(col.data as Uint32Array)[row]!] ?? naRep
   }
   return String((col.data as Float64Array | Int32Array | Uint32Array)[row]!)
 }
 
 const mdCell = (s: string) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
 
-export function tableToMarkdown(table: TableView, maxRows = 50): string {
-  const names = table.schema.map((f) => f.name)
-  const n = Math.min(table.numRows, maxRows)
+export function tableToMarkdown(table: TableView, maxRowsOrOpts: number | PresentWriteOptions = 50): string {
+  const opts = resolvePresent(maxRowsOrOpts, 50)
+  const view = projectPresent(table, opts.columns)
+  const names = view.schema.map((f) => f.name)
+  const n = Math.min(view.numRows, opts.maxRows)
   const header = `| ${names.map(mdCell).join(' | ')} |`
   const sep = `| ${names.map(() => '---').join(' | ')} |`
   const rows: string[] = [header, sep]
   for (let i = 0; i < n; i++) {
-    rows.push(`| ${names.map((_, ci) => mdCell(cellAt(table, ci, i))).join(' | ')} |`)
+    rows.push(`| ${names.map((_, ci) => mdCell(cellAt(view, ci, i, opts.naRep))).join(' | ')} |`)
   }
-  if (table.numRows > maxRows) rows.push(`| … (${table.numRows - maxRows} more rows) |`)
+  if (view.numRows > opts.maxRows) rows.push(`| … (${view.numRows - opts.maxRows} more rows) |`)
   return rows.join('\n')
 }
 
-export function tableToHtml(table: TableView, maxRows = 100): string {
-  const names = table.schema.map((f) => f.name)
-  const n = Math.min(table.numRows, maxRows)
+export function tableToHtml(table: TableView, maxRowsOrOpts: number | PresentWriteOptions = 100): string {
+  const opts = resolvePresent(maxRowsOrOpts, 100)
+  const view = projectPresent(table, opts.columns)
+  const names = view.schema.map((f) => f.name)
+  const n = Math.min(view.numRows, opts.maxRows)
   const thead = `<thead><tr>${names.map((nm) => `<th>${escapeHtml(nm)}</th>`).join('')}</tr></thead>`
   const bodyRows: string[] = []
   for (let i = 0; i < n; i++) {
     bodyRows.push(
-      `<tr>${names.map((_, ci) => `<td>${escapeHtml(cellAt(table, ci, i))}</td>`).join('')}</tr>`,
+      `<tr>${names.map((_, ci) => `<td>${escapeHtml(cellAt(view, ci, i, opts.naRep))}</td>`).join('')}</tr>`,
     )
   }
   return `<table>${thead}<tbody>${bodyRows.join('')}</tbody></table>`

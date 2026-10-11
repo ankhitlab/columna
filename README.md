@@ -478,14 +478,22 @@ await df.tail(5).sample({ n: 10, seed: 1 }).collect()
 await left.semiJoin(right, 'id').crossJoin(dims).collect()
 
 df.toCsv()
+df.toCsv({ separator: ';', naRep: 'NA', decimal: ',', encoding: 'utf-8' })
 df.toCsv({ escapeFormulas: true })  // neutralise =, +, -, @ cells for Excel-bound exports of untrusted text
-await df.writeParquet('./out.parquet')  // Apache Parquet via hyparquet-writer (round-trips with readParquet)
+await df.writeCsv('./out.csv', { delimiter: '\t', lineTerminator: '\r\n' })
+df.toJson({ orient: 'records' })
+df.toJson({ lines: true })  // NDJSON
+await df.writeJson('./out.json', { orient: 'columns', indent: 2 })
+await df.writeParquet('./out.parquet', { codec: 'SNAPPY', columns: ['id', 'value'] })
 await df.writeParquetLike('./out.columna.json')  // custom JSON container (not Apache Parquet)
-df.toMarkdown()
+await df.writeExcel('./out.xlsx', { sheet: 'data' })
+df.toMarkdown({ maxRows: 20, naRep: 'NA' })
+df.toHTML({ columns: ['a', 'b'] })
+df.toBlob('parquet', { codec: 'GZIP' })
 df.profile()
 ```
 
-> **Note:** `writeParquet()` writes real Apache Parquet. `writeParquetLike()` is the older JSON `columna-parquet-like-v1` format for in-process round-trips without hyparquet.
+> **Note:** `writeParquet()` writes real Apache Parquet. `writeParquetLike()` is the older JSON `columna-parquet-like-v1` format for in-process round-trips without hyparquet. Writer options mirror the corresponding readers / pandas (`sep`/`delimiter`, `orient`, `codec`, …); omitting options keeps the previous defaults.
 
 ## Advanced statistics (`columna/advanced`)
 

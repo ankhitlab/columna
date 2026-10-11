@@ -236,7 +236,7 @@ export function ols(y: Column, X: Predictors, options: OlsOptions = {}): OlsResu
     const e = fit.residuals[i]!
     const h = lev[i]!
     const denom = 1 - h
-    press += denom > 1e-12 ? (e / denom) ** 2 : 0
+    press += denom > 1e-12 ? (e / denom) ** 2 : Infinity
     const r = denom > 1e-12 ? e / (s * Math.sqrt(denom)) : NaN
     std[i] = r
     const sMinus2 = dfe > 1 ? (sse - (e * e) / denom) / (dfe - 1) : NaN
@@ -246,7 +246,7 @@ export function ols(y: Column, X: Predictors, options: OlsOptions = {}): OlsResu
   }
   const r2 = sst > 0 ? 1 - sse / sst : NaN
   const r2adj = sst > 0 ? 1 - (sse / dfe) / (sst / dft) : NaN
-  const r2pred = sst > 0 ? 1 - press / sst : NaN
+  const r2pred = sst > 0 && Number.isFinite(press) ? 1 - press / sst : NaN
   // coefficient table
   const td = tDist(dfe)
   const tcrit = td.ppf(0.5 + confidence / 2)

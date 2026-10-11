@@ -69,8 +69,23 @@ import {
   type ReadSqlOptions,
   type SqlConnection,
 } from './io/index.js'
-import { writeCsvText, writeParquetBytes, writeParquetLikeBytes, tableToCsv, tableToParquetLike, type CsvWriteOptions } from './io/write.js'
-import { profileTable, tableToHtml, tableToMarkdown, type ProfileReport } from './io/present.js'
+import {
+  writeCsvText,
+  writeParquetBytes,
+  writeParquetLikeBytes,
+  writeJsonText,
+  writeExcelBytes,
+  tableToCsv,
+  tableToJson,
+  tableToParquetLike,
+  tableToParquetBytes,
+  type CsvWriteOptions,
+  type ParquetWriteOptions,
+  type ParquetLikeWriteOptions,
+  type JsonWriteOptions,
+  type ExcelWriteOptions,
+} from './io/write.js'
+import { profileTable, tableToHtml, tableToMarkdown, type PresentWriteOptions, type ProfileReport } from './io/present.js'
 export type AggSpec = Record<string, AggKind | AnyExpr>
 
 // ---------------------------------------------------------------------------------------------------
@@ -1351,9 +1366,9 @@ export class DataFrame<S extends Row = Row> {
   }
 
   /**
-   * CSV text. `{ escapeFormulas: true }` neutralises text cells a spreadsheet would run as formulas
-   * (leading = + - @ tab CR → "'"-prefixed, quoted) — use it for exports of untrusted text that will be
-   * opened in Excel-like applications; the default writes the data unchanged.
+   * CSV text. Options mirror pandas `to_csv` / `ReadCsvOptions` (`separator`/`delimiter`, `encoding`,
+   * `quoteChar`, `header`, `naRep`, `decimal`, `lineTerminator`, `columns`). `{ escapeFormulas: true }`
+   * neutralises text cells a spreadsheet would run as formulas — off by default.
    */
   toCsv(options: CsvWriteOptions = {}): string {
     return tableToCsv(this.table, options)
@@ -1364,27 +1379,54 @@ export class DataFrame<S extends Row = Row> {
     return writeCsvText(this.table, path, options)
   }
 
-  /** Write Apache Parquet (hyparquet-writer; round-trips with `readParquet`). */
-  async writeParquet(path?: string): Promise<Uint8Array> {
-    return writeParquetBytes(this.table, path)
+  /** Write Apache Parquet (hyparquet-writer; round-trips with `readParquet`). Default codec SNAPPY. */
+  async writeParquet(path?: string, options: ParquetWriteOptions = {}): Promise<Uint8Array> {
+    return writeParquetBytes(this.table, path, options)
   }
 
   /** Write columna's JSON "parquet-like" format (round-trips with `readParquetLike`, not Apache Parquet). */
-  async writeParquetLike(path?: string): Promise<Uint8Array> {
-    return writeParquetLikeBytes(this.table, path)
+  async writeParquetLike(path?: string, options: ParquetLikeWriteOptions = {}): Promise<Uint8Array> {
+    return writeParquetLikeBytes(this.table, path, options)
   }
 
-  toMarkdown(maxRows?: number): string {
-    return tableToMarkdown(this.table, maxRows)
+  /** JSON text (`orient`: `records` | `columns` | `values` | `lines`). */
+  toJson(options: JsonWriteOptions = {}): string {
+    return tableToJson(this.table, options)
   }
 
-  toHTML(maxRows?: number): string {
-    return tableToHtml(this.table, maxRows)
+  /** Write JSON to a path (resolves to '') or return the text when no path is given. */
+  async writeJson(path?: string, options: JsonWriteOptions = {}): Promise<string> {
+    return writeJsonText(this.table, path, options)
   }
 
-  toBlob(format: 'csv' | 'parquet-like' = 'csv', options: CsvWriteOptions = {}): Blob {
-    if (format === 'csv') return new Blob([this.toCsv(options)], { type: 'text/csv' })
-    const bytes = tableToParquetLike(this.table)
+  /** Write Excel (.xlsx) bytes; optionally to a Node path. */
+  async writeExcel(path?: string, options: ExcelWriteOptions = {}): Promise<Uint8Array> {
+    return writeExcelBytes(this.table, path, options)
+  }
+
+  toMarkdown(maxRowsOrOpts?: number | PresentWriteOptions): string {
+    return tableToMarkdown(this.table, maxRowsOrOpts)
+  }
+
+  toHTML(maxRowsOrOpts?: number | PresentWriteOptions): string {
+    return tableToHtml(this.table, maxRowsOrOpts)
+  }
+
+  toBlob(
+    format: 'csv' | 'parquet-like' | 'parquet' | 'json' = 'csv',
+    options: CsvWriteOptions | ParquetWriteOptions | ParquetLikeWriteOptions | JsonWriteOptions = {},
+  ): Blob {
+    if (format === 'csv') return new Blob([this.toCsv(options as CsvWriteOptions)], { type: 'text/csv' })
+    if (format === 'json') {
+      return new Blob([this.toJson(options as JsonWriteOptions)], { type: 'application/json' })
+    }
+    if (format === 'parquet') {
+      const bytes = tableToParquetBytes(this.table, options as ParquetWriteOptions)
+      const copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+      return new Blob([copy], { type: 'application/vnd.apache.parquet' })
+    }
+    const bytes = tableToParquetLike(this.table, options as ParquetLikeWriteOptions)
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
     return new Blob([copy], { type: 'application/json' })

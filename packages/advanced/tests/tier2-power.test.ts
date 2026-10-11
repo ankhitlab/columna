@@ -127,9 +127,10 @@ describe('2.10 power and sample size', () => {
       expect(r.power).toBeGreaterThanOrEqual(0.9)
       expect(power({ test, effect: 0.5, n: r.n - 1, ...extra }).power).toBeLessThan(0.9)
       close(power({ test, n: r.n, power: r.power, ...extra }).effect, 0.5, 6)
-      // 'less' alternative solves below the null
+      // 'less' for 1 proportion: p_alt < p0; for 2 proportions direction is p1−p2 so p2 > p1.
       const l = power({ test, n: 100, power: 0.8, alternative: 'less', ...extra })
-      expect(l.effect).toBeLessThan(0.3)
+      if (test === '1 proportion') expect(l.effect).toBeLessThan(0.3)
+      else expect(l.effect).toBeGreaterThan(0.3)
     }
     expect(() => power({ test: '1-sample t', effect: 1 })).toThrow(RangeError)
     expect(() => power({ test: '1-sample t', effect: 1, n: 10, power: 0.5 })).toThrow(RangeError)

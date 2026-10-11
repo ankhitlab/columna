@@ -30,8 +30,13 @@
 | `df['x'].shift(1)` / lead | `df.withWindow('prev', 'lag' \| 'lead', { expr: col('x'), offset: 1 })` |
 | `df.iloc[a:b]` | `df.slice(a, b)` |
 | `df.iloc[[i,j]]` | `df.take([i, j])` |
-| `pd.read_csv` | `DataFrame.fromCSV(text)` / `fromCSVUrl` |
-| `pd.read_json` | `DataFrame.fromJSON(...)` |
+| `pd.read_csv` | `DataFrame.fromCSV(text)` / `fromCSVUrl` / `readCsv` |
+| `pd.read_json` | `DataFrame.fromJSON(...)` / `readJson` |
+| `df.to_csv(...)` | `df.toCsv({ separator, encoding, quoteChar, header, naRep, decimal, lineTerminator, columns })` / `writeCsv(path, …)` |
+| `df.to_json(...)` | `df.toJson({ orient, lines, columns, indent })` / `writeJson(path, …)` |
+| `df.to_excel(...)` | `df.writeExcel(path, { sheet, columns, header })` |
+| `df.to_parquet(...)` | `df.writeParquet(path, { codec, columns, rowGroupSize, statistics })` |
+| `df.to_feather` / `to_ipc` | `df.toArrowIpc({ format: 'file', columns, batchRows })` / `writeArrowIpc` |
 
 Notes:
 - Chains are **lazy**; call `.collect()` (or `.toArray()`) to execute.

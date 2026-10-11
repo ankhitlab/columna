@@ -3,7 +3,7 @@
  * 1-Sample Z, 1 / 2 Proportions (exact and normal), 1- / 2-Sample Poisson Rate, 1 Variance
  * (χ² and Bonett), Correlation with p-value and CI, Outlier tests (Grubbs, Dixon).
  */
-import { betainc, binomial, chi2 as chi2Dist, hypergeomPmf, normal, poisson, t as tDist } from './dist.js'
+import { lgamma, betainc, binomial, chi2 as chi2Dist, hypergeomPmf, normal, poisson, t as tDist } from './dist.js'
 import { cleanNumbers, type Alternative } from './tests.js'
 
 const STD = normal()
@@ -134,14 +134,20 @@ export function propTest1(
     if (alternative === 'less') pValue = d.cdf(events)
     else if (alternative === 'greater') pValue = d.sf(events - 1)
     else {
-      // sum of probabilities of outcomes at most as likely as the observed one (scipy binomtest)
-      const pObs = d.pmf(events)
-      let s = 0
-      for (let k = 0; k <= trials; k++) {
-        const pk = d.pmf(k)
-        if (pk <= pObs * (1 + 1e-7)) s += pk
+      // Two-sided probability ordering. Sum CDF/SF tails selected by log-PMF,
+      // rather than visiting every trial count or underflowing the observed PMF.
+      const logp = (k: number) => lgamma(trials + 1) - lgamma(k + 1) - lgamma(trials - k + 1) + k * Math.log(p0) + (trials - k) * Math.log1p(-p0)
+      const threshold = logp(events) + Math.log1p(1e-7)
+      const mode = Math.min(trials, Math.floor((trials + 1) * p0))
+      if (logp(mode) <= threshold) pValue = 1
+      else {
+        let lo = -1, hi = mode
+        while (hi - lo > 1) { const mid = Math.floor((lo + hi) / 2); if (logp(mid) <= threshold) lo = mid; else hi = mid }
+        const left = lo
+        lo = mode; hi = trials + 1
+        while (hi - lo > 1) { const mid = Math.floor((lo + hi) / 2); if (logp(mid) <= threshold) hi = mid; else lo = mid }
+        pValue = Math.min(1, d.cdf(left) + d.sf(hi - 1))
       }
-      pValue = Math.min(1, s)
     }
     ci = clopperPearson(events, trials, confidence, alternative)
   } else {
@@ -786,4 +792,16 @@ export function dixon(
   }
   const pValue = (ref.length - lo) / ref.length
   return { test: 'Dixon', statistic, critical, pValue, alpha, alternative, outlier: { index: idx, value: v[idx]! }, significant: statistic > critical, n }
+}
+
+/** Exact two-sided Clopper-Pearson interval without enumerating a hypothesis-test p-value. */
+export function proportionInterval(events: number, trials: number, confidence = 0.95): [number, number] {
+  if (!Number.isSafeInteger(events) || !Number.isSafeInteger(trials) || trials < 1 || events < 0 || events > trials) throw new RangeError('proportionInterval: invalid counts')
+  return clopperPearson(events, trials, checkConf(confidence), 'two-sided')
+}
+/** Exact Garwood confidence interval for a Poisson rate; exposure may be non-integer. */
+export function poissonRateInterval(events: number, exposure: number, confidence = 0.95): [number, number] {
+  if (!Number.isSafeInteger(events) || events < 0 || !Number.isFinite(exposure) || exposure <= 0) throw new RangeError('poissonRateInterval: invalid counts/exposure')
+  const ci = poissonExactCI(events, checkConf(confidence), 'two-sided')
+  return [ci[0] / exposure, ci[1] / exposure]
 }

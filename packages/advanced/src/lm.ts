@@ -83,7 +83,9 @@ function countBits(mask: number): number {
 function expandPower(v: string): string[] {
   const m = /^(.+)\^(\d+)$/.exec(v)
   if (!m) return [v]
-  return new Array(Number(m[2])).fill(m[1]!)
+  const degree = Number(m[2])
+  if (!Number.isInteger(degree) || degree < 1 || degree > 12) throw new RangeError('formula: polynomial degree must be in 1..12')
+  return new Array(degree).fill(m[1]!)
 }
 
 interface FactorInfo {
@@ -135,7 +137,7 @@ export function modelMatrix(data: Data, formula: Formula | string, options: { fa
       if (!ok) break
       if (v === f.response) continue
       const val = data[v]![i]
-      if (val === null || val === undefined || (!factors.has(v) && !(typeof val === 'number' && Number.isFinite(val)))) ok = false
+      if (val === null || val === undefined || val === '' || (typeof val === 'number' && !Number.isFinite(val)) || (!factors.has(v) && typeof val !== 'number')) ok = false
     }
     ;(ok ? keep : omitted).push(i)
   }
@@ -203,6 +205,7 @@ export function modelMatrix(data: Data, formula: Formula | string, options: { fa
     termColumns.push({ term, cols: Array.from({ length: columns.length - start }, (_, i) => start + i) })
   }
   const p = columns.length
+  if (p === 0) throw new RangeError('modelMatrix: model has no coefficients')
   const X = matrix(n, p)
   for (let r = 0; r < n; r++) for (let j = 0; j < p; j++) X.data[r * p + j] = columns[j]![r]!
   return { X, y: Float64Array.from(keep, (i) => yCol[i] as number), keep, omitted, columnNames, termColumns, factors, intercept: f.intercept }
@@ -240,8 +243,8 @@ export interface LinearModelResult {
   r2: number
   r2adj: number
   r2pred: number
-  /** Fitted (LS) means per factor level for each main-effect factor: mean of fitted values at that level. */
-  means: Record<string, Array<{ level: string; n: number; mean: number; fittedMean: number; se: number }>>
+  /** Equal-weight LS means over other factors, with covariates fixed at complete-case means. */
+  means: Record<string, Array<{ level: string; n: number; mean: number; fittedMean: number; se: number; ci?: [number, number] }>>
   fitted: Float64Array
   residuals: Float64Array
   standardizedResiduals: Float64Array
@@ -252,6 +255,13 @@ export interface LinearModelResult {
   columnNames: string[]
   omitted: number[]
   design: Matrix
+  /** Covariance in the full coefficient order. Nonestimable fits must not be used for contrasts. */
+  covariance: Matrix
+  keep: number[]
+  y: Float64Array
+  covariateMeans: Record<string, number>
+  confidence: number
+  press: number
 }
 
 /**
@@ -260,12 +270,13 @@ export interface LinearModelResult {
  */
 export function linearModel(data: Data, formula: string, options: { factors?: string[]; confidence?: number } = {}): LinearModelResult {
   const confidence = options.confidence ?? 0.95
+  if (!(confidence > 0 && confidence < 1)) throw new RangeError('linearModel: confidence must be in (0, 1)')
   const f = parseFormula(formula)
   const mm = modelMatrix(data, f, options)
   const { X, y, keep, columnNames } = mm
   const n = X.rows
   const pAll = X.cols
-  if (n <= pAll - 0 && n <= 1) throw new RangeError('linearModel needs more observations than coefficients')
+  if (n <= pAll) throw new RangeError(`linearModel: need more complete observations than coefficients (n=${n}, p=${pAll})`)
   const full = lstsq(X, y)
   const p = full.rank
   const dfe = n - p
@@ -355,7 +366,7 @@ export function linearModel(data: Data, formula: string, options: { factors?: st
     const h = full.leverage[i]!
     const e = full.residuals[i]!
     const d = 1 - h
-    press += d > 1e-12 ? (e / d) ** 2 : 0
+    press += d > 1e-12 ? (e / d) ** 2 : Infinity
     std[i] = d > 1e-12 ? e / (s * Math.sqrt(d)) : NaN
     cook[i] = (std[i]! ** 2 * h) / (p * d)
   }
@@ -366,24 +377,16 @@ export function linearModel(data: Data, formula: string, options: { factors?: st
     if (full.leverage[i]! > (3 * p) / n || full.leverage[i]! > 0.99) flags += 'X'
     if (flags) unusual.push({ index: keep[i]!, y: y[i]!, fitted: full.fitted[i]!, residual: full.residuals[i]!, stdResidual: std[i]!, flags })
   }
-  // means per main-effect factor level
-  const means: LinearModelResult['means'] = {}
-  for (const [name, info] of mm.factors) {
-    const col = data[name]!
-    means[name] = info.levels.map((level) => {
-      let cnt = 0
-      let sy = 0
-      let sf = 0
-      for (let i = 0; i < n; i++) {
-        if (String(col[keep[i]!]) !== level) continue
-        cnt++
-        sy += y[i]!
-        sf += full.fitted[i]!
-      }
-      return { level, n: cnt, mean: cnt ? sy / cnt : NaN, fittedMean: cnt ? sf / cnt : NaN, se: cnt ? s / Math.sqrt(cnt) : NaN }
-    })
+  const covariance = matrix(pAll, pAll, Float64Array.from(full.xtxInv.data, (v) => v * mse))
+  const covariateMeans: Record<string, number> = Object.create(null)
+  for (const v of new Set(f.terms.flatMap((term) => term.vars))) {
+    if (mm.factors.has(v)) continue
+    let sum = 0
+    for (const i of keep) sum += data[v]![i] as number
+    covariateMeans[v] = sum / n
   }
-  return {
+  const means: LinearModelResult['means'] = Object.create(null)
+  const result: LinearModelResult = {
     test: 'general linear model',
     formula: f,
     n,
@@ -392,7 +395,7 @@ export function linearModel(data: Data, formula: string, options: { factors?: st
     s,
     r2: sst > 0 ? 1 - sse / sst : NaN,
     r2adj: sst > 0 ? 1 - mse / (sst / dft) : NaN,
-    r2pred: sst > 0 ? 1 - press / sst : NaN,
+    r2pred: sst > 0 && Number.isFinite(press) ? 1 - press / sst : NaN,
     means,
     fitted: full.fitted,
     residuals: full.residuals,
@@ -403,6 +406,77 @@ export function linearModel(data: Data, formula: string, options: { factors?: st
     factors: Object.fromEntries([...mm.factors].map(([k, v]) => [k, v.levels])),
     columnNames,
     omitted: mm.omitted,
-    design: X,
+    design: X, covariance, keep, y, covariateMeans, confidence, press,
   }
+  for (const [name, info] of mm.factors) {
+    means[name] = info.levels.map((level) => {
+      let count = 0, total = 0
+      for (let i = 0; i < n; i++) if (String(data[name]![keep[i]!]) === level) { count++; total += y[i]! }
+      if (!fullRank) return { level, n: count, mean: total / count, fittedMean: NaN, se: NaN }
+      const predicted = linearModelContrast(result, linearModelVector(result, { [name]: level }, true))
+      return { level, n: count, mean: total / count, fittedMean: predicted.fit, se: predicted.se, ci: predicted.ci }
+    })
+  }
+  return result
+}
+
+/** Construct a design row in the fitted coding. When marginal=true, unspecified factors
+ * are averaged equally and covariates fixed at their complete-case means. The expectation
+ * is evaluated algebraically by variable; no exponentially large reference grid is built. */
+export function linearModelVector(fit: LinearModelResult, values: Record<string, unknown>, marginal = false): Float64Array {
+  const vars = new Set(fit.formula.terms.flatMap((term) => term.vars))
+  for (const v of vars) {
+    if (Object.hasOwn(values, v)) {
+      const value = values[v]
+      if (fit.factors[v]) {
+        if (value == null || !fit.factors[v]!.includes(String(value))) throw new RangeError(`linearModelVector: unknown level of ${v}`)
+      } else if (typeof value !== 'number' || !Number.isFinite(value)) throw new RangeError(`linearModelVector: ${v} must be finite`)
+    } else if (!marginal) throw new RangeError(`linearModelVector: missing predictor ${v}`)
+  }
+  const out: number[] = fit.formula.intercept ? [1] : []
+  for (const term of fit.formula.terms) {
+    let products: Array<Array<[string, number]>> = [[]]
+    for (const v of term.vars) {
+      const width = fit.factors[v] ? fit.factors[v]!.length - 1 : 1
+      products = products.flatMap((p) => Array.from({ length: width }, (_, j) => [...p, [v, j] as [string, number]]))
+    }
+    for (const product of products) {
+      const grouped = new Map<string, number[]>()
+      for (const [v, j] of product) { const arr = grouped.get(v) ?? []; arr.push(j); grouped.set(v, arr) }
+      let value = 1
+      for (const [v, js] of grouped) {
+        const levels = fit.factors[v]
+        if (!levels) { value *= ((values[v] ?? fit.covariateMeans[v]) as number) ** js.length; continue }
+        const at = (level: string) => js.reduce((p, j) => p * (level === levels[j] ? 1 : level === levels.at(-1) ? -1 : 0), 1)
+        value *= Object.hasOwn(values, v) ? at(String(values[v])) : levels.reduce((s, l) => s + at(l), 0) / levels.length
+      }
+      out.push(value)
+    }
+  }
+  if (out.length !== fit.coefficients.length || out.some((v) => !Number.isFinite(v))) throw new RangeError('linearModelVector: invalid or overflowing design row')
+  return Float64Array.from(out)
+}
+
+/** Estimate a linear function of coefficients, its SE and pointwise t interval.
+ * The same covariance calculation is used for predictions and LS-mean differences. */
+export function linearModelContrast(fit: LinearModelResult, vector: ArrayLike<number>, confidence = fit.confidence): { fit: number; se: number; ci: [number, number]; pi: [number, number] } {
+  if (!(confidence > 0 && confidence < 1)) throw new RangeError('linearModelContrast: invalid confidence')
+  if (fit.coefficients.some((c) => c.aliased)) throw new RangeError('linearModelContrast: rank-deficient model; contrast estimability is not implemented')
+  const p = fit.coefficients.length
+  if (vector.length !== p) throw new RangeError('linearModelContrast: wrong coefficient vector length')
+  let estimate = 0, variance = 0
+  for (let j = 0; j < p; j++) {
+    if (!Number.isFinite(vector[j])) throw new RangeError('linearModelContrast: vector must be finite')
+    estimate += vector[j]! * fit.coefficients[j]!.coef
+    for (let k = 0; k < p; k++) variance += vector[j]! * fit.covariance.data[j * p + k]! * vector[k]!
+  }
+  if (!Number.isFinite(estimate) || !Number.isFinite(variance)) throw new RangeError('linearModelContrast: numerical overflow')
+  const se = Math.sqrt(Math.max(0, variance)), critical = tDist(fit.anova.error.df).ppf(.5 + confidence / 2)
+  const h = critical * se, hp = critical * Math.sqrt(se * se + fit.s * fit.s)
+  return { fit: estimate, se, ci: [estimate - h, estimate + h], pi: [estimate - hp, estimate + hp] }
+}
+
+/** New observations: unknown factor levels and incomplete rows are rejected, never re-coded. */
+export function predictLinearModel(fit: LinearModelResult, rows: Array<Record<string, unknown>>, confidence = fit.confidence) {
+  return rows.map((row) => linearModelContrast(fit, linearModelVector(fit, row), confidence))
 }

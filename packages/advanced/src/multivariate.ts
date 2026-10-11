@@ -33,20 +33,28 @@ function standardize(X: Matrix, center = true, scale = true): { Z: Matrix; mean:
   return { Z, mean, sd }
 }
 
+/** Joint complete-case conversion: never realign independently cleaned columns. */
 function asMatrix(data: ArrayLike<ArrayLike<number>> | Record<string, ArrayLike<number | null | undefined>>, names?: string[]): { X: Matrix; names: string[] } {
+  let rows: ArrayLike<number | null | undefined>[], keys: string[]
   if (Array.isArray(data)) {
-    const rows = data as ArrayLike<number>[]
-    const n = rows.length
-    const p = Array.from(rows[0]!).length
-    const X = matrix(n, p)
-    for (let i = 0; i < n; i++) for (let j = 0; j < p; j++) X.data[i * p + j] = Number((rows[i] as ArrayLike<number>)[j])
-    return { X, names: names ?? Array.from({ length: p }, (_, j) => `X${j + 1}`) }
+    rows = data
+    const p = rows[0]?.length ?? 0
+    if (!p || rows.some(row => row.length !== p)) throw new RangeError('multivariate: nonempty rectangular matrix required')
+    keys = names ?? Array.from({length:p}, (_,j)=>`X${j+1}`)
+    if (keys.length !== p) throw new RangeError('multivariate: names must match matrix width')
+  } else {
+    keys = names ?? Object.keys(data)
+    if (!keys.length) throw new RangeError('multivariate: provide data columns')
+    const columns = keys.map(key => (data as Record<string, ArrayLike<number | null | undefined>>)[key])
+    const n = columns[0]?.length
+    if (n === undefined || columns.some(col => !col || col.length !== n)) throw new RangeError('multivariate: columns must have equal length')
+    rows = Array.from({length:n}, (_,j)=>columns.map(col=>col[j]))
   }
-  const keys = names ?? Object.keys(data)
-  const cols = keys.map((k) => Array.from(cleanNumbers((data as Record<string, ArrayLike<number | null | undefined>>)[k]!)))
-  const n = cols[0]!.length
-  if (cols.some((c) => c.length !== n)) throw new RangeError('pca: columns must have equal length')
-  return { X: fromColumns(cols), names: keys }
+  const kept = rows.filter(row => Array.from(row).every(v => typeof v === 'number' && Number.isFinite(v)))
+  if (kept.length < 2) throw new RangeError('multivariate: at least two jointly complete rows required')
+  const X = matrix(kept.length, keys.length)
+  for(let j=0;j<kept.length;j++) for(let k=0;k<keys.length;k++) X.data[j*keys.length+k]=kept[j]![k]!
+  return {X, names:keys}
 }
 
 // ---- PCA ------------------------------------------------------------------------------------------
@@ -289,7 +297,7 @@ export function factorAnalysis(
   let loadings: number[][] = p0.loadings.map((row) =>
     row.slice(0, nFactors).map((v, j) => v * Math.sqrt(p0.eigenvalues[j]!)),
   )
-  let uniqueVariances = loadings.map((row) => Math.max(0.01, 1 - row.reduce((s, v) => s + v * v, 0)))
+  let uniqueVariances = loadings.map((row) => Math.max(method === 'ml' ? 0.01 : 0, 1 - row.reduce((s, v) => s + v * v, 0)))
   let logLik: number | undefined
 
   if (method === 'ml') {

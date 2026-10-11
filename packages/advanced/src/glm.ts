@@ -163,10 +163,18 @@ function irls(X: Matrix, y: Float64Array, w: Float64Array, offset: Float64Array,
     for (let i = 0; i < n; i++) {
       const d = L.dmu(eta[i]!)
       const v = variance(family, mu[i]!)
-      const wi = (w[i]! * d * d) / v
+      const wi = v > 0 ? (w[i]! * d * d) / v : 0
       sw[i] = Math.sqrt(Math.max(wi, 0))
-      z[i] = (eta[i]! - offset[i]! + (y[i]! - mu[i]!) / d) * sw[i]!
-      for (let j = 0; j < p; j++) Xw.data[i * p + j] = X.data[i * p + j]! * sw[i]!
+      const adj = d !== 0 && Number.isFinite(d) ? (y[i]! - mu[i]!) / d : 0
+      z[i] = (eta[i]! - offset[i]! + adj) * sw[i]!
+      if (!Number.isFinite(z[i]!) || !Number.isFinite(sw[i]!)) {
+        sw[i] = 0
+        z[i] = 0
+      }
+      for (let j = 0; j < p; j++) {
+        const xij = X.data[i * p + j]! * sw[i]!
+        Xw.data[i * p + j] = Number.isFinite(xij) ? xij : 0
+      }
     }
     last = lstsq(Xw, z)
     coef = Float64Array.from(last.coef)

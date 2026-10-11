@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-11
+
+### Added
+
+- Studio-oriented `columna/advanced` APIs (proposed patch series 0001-0021): process-quality /
+  SPC/capability helpers, linear and inference workbenches, engineering workbench (DOE / MSA /
+  time series / reliability / multivariate), worksheet expression calculator, nonnormal and
+  between/within capability with staged SPC, expanded Gage R&R via REML, and `graphWorkbench`
+  chart statistics (no UI/SVG), with independent reference fixtures and tests.
+- Export options aligned with pandas / existing readers:
+  - `toCsv` / `writeCsv`: `separator`/`delimiter`, `encoding`, `quoteChar`, `header`, `naRep`,
+    `decimal`, `lineTerminator`, `columns` (plus existing `escapeFormulas`).
+  - `writeParquet`: `codec` (`SNAPPY` | `UNCOMPRESSED` | `GZIP`), `columns`, `rowGroupSize`,
+    `statistics`; `writeParquetLike` accepts `columns`.
+  - `toJson` / `writeJson` with `orient` / `lines` / `columns` / `indent` / `encoding`.
+  - `writeExcel` (`.xlsx`) with `sheet`/`sheetName`, `columns`, `header`.
+  - `toMarkdown` / `toHTML` accept `{ maxRows, columns, naRep }` (positional `maxRows` still works).
+  - `toArrowIpc` / `writeArrowIpc`: `columns` subset.
+  - `toBlob` formats: `csv` | `json` | `parquet` | `parquet-like` with matching option bags.
+
+### Changed
+
+- CSV / Parquet / present / Arrow writers keep prior output when options are omitted; non-default
+  options take the JS (or option-aware) path instead of the native unquoted CSV fast path.
+
 ## [0.4.1] - 2026-10-03
 
 ### Fixed

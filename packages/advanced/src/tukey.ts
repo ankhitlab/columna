@@ -7,7 +7,7 @@
  * standard deviation. Gauss–Legendre nodes / weights are generated numerically at load time
  * instead of being transcribed.
  */
-import { lgamma, normal } from './dist.js'
+import { lgamma, normal, t as tDist, chi2 as chi2Dist } from './dist.js'
 import { cleanNumbers } from './tests.js'
 
 const STD = normal()
@@ -103,6 +103,26 @@ export function ptukey(q: number, k: number, df: number, nranges = 1): number {
   if (q <= 0) return 0
   if (df < 2 || nranges < 1 || k < 2) return NaN
   if (!Number.isFinite(q)) return 1
+  if (k === 2 && nranges === 1) return Math.max(0, 1 - 2 * tDist(df).sf(q / Math.SQRT2))
+  // Integrating over the standard deviation, rather than variance, avoids the
+  // endpoint quadrature bias of the original fixed panels for small error df.
+  if (df <= 10) {
+    const max = Math.sqrt(chi2Dist(df).isf(1e-13) / df)
+    const boundaries = [0, max]
+    for (let x = .25; x < max; x += .25) boundaries.push(x)
+    for (const c of [.5, 1, 2, 4, 8, 16]) if (c / q < max) boundaries.push(c / q)
+    boundaries.sort((a, b) => a - b)
+    const logConst = Math.LN2 + (df / 2) * Math.log(df / 2) - lgamma(df / 2)
+    let sum = 0
+    for (let i = 1; i < boundaries.length; i++) {
+      const mid = (boundaries[i]! + boundaries[i - 1]!) / 2, half = (boundaries[i]! - boundaries[i - 1]!) / 2
+      for (let j = 0; j < LEG16.x.length; j++) for (const sign of [-1, 1]) {
+        const s = mid + sign * half * LEG16.x[j]!
+        sum += half * LEG16.w[j]! * wprob(q * s, nranges, k) * Math.exp(logConst + (df - 1) * Math.log(s) - df * s * s / 2)
+      }
+    }
+    return Math.min(1, Math.max(0, sum))
+  }
   if (df > 25000) return wprob(q, nranges, k)
 
   const f2 = df * 0.5
@@ -145,46 +165,17 @@ export function qtukey(p: number, k: number, df: number, nranges = 1): number {
   if (Number.isNaN(p) || p < 0 || p > 1) return NaN
   if (p === 0) return 0
   if (p === 1) return Infinity
-  // initial guess from R's qinv (Copenhaver & Holland) then secant iterations
-  const p0 = 0.322232421088
-  const q0 = 0.99348462606
-  const p1 = -1
-  const q1 = 0.588581570495
-  const p2 = -0.342242088547
-  const q2 = 0.531103462366
-  const p3 = -0.204231210125
-  const q3 = 0.10353775285
-  const p4 = -0.453642210148e-4
-  const q4 = 0.38560700634e-2
-  const c1 = 0.8832
-  const c2 = 0.2368
-  const c3 = 1.214
-  const c4 = 1.208
-  const c5 = 1.4142
-  const ps = 0.5 - 0.5 * p
-  const yi = Math.sqrt(Math.log(1 / (ps * ps)))
-  let t = yi + ((((yi * p4 + p3) * yi + p2) * yi + p1) * yi + p0) / ((((yi * q4 + q3) * yi + q2) * yi + q1) * yi + q0)
-  if (df < 120) t += (t * t * t + t) / df / 4
-  let qq = c1 - c2 * t
-  if (df < 120) qq += -c3 / df + (c4 * t) / df
-  let x0 = t * (qq * Math.log(k - 1) + c5)
-
-  // secant with bisection safeguard on f(x) = ptukey(x) − p
-  let valx0 = ptukey(x0, k, df, nranges) - p
-  let x1 = valx0 > 0 ? Math.max(0, x0 - 1) : x0 + 1
-  let valx1 = ptukey(x1, k, df, nranges) - p
-  let ans = 0
-  for (let iter = 1; iter < 100; iter++) {
-    if (valx1 === valx0) break
-    ans = x1 - (valx1 * (x1 - x0)) / (valx1 - valx0)
-    if (ans < 0) ans = 0
-    valx0 = valx1
-    x0 = x1
-    valx1 = ptukey(ans, k, df, nranges) - p
-    x1 = ans
-    if (Math.abs(x1 - x0) < 1e-10 * Math.max(1, x1)) break
+  if (!(k >= 2 && df >= 2 && nranges >= 1)) throw new RangeError('qtukey: need k >= 2 and df >= 2')
+  let lo = 0, hi = 4
+  while (ptukey(hi, k, df, nranges) < p && hi < 1e8) hi *= 2
+  if (ptukey(hi, k, df, nranges) < p) throw new RangeError('qtukey: failed to bracket quantile')
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2
+    if (ptukey(mid, k, df, nranges) < p) lo = mid
+    else hi = mid
+    if (hi - lo <= 1e-9 * Math.max(1, hi)) break
   }
-  return ans
+  return (lo + hi) / 2
 }
 
 export interface TukeyComparison {
@@ -251,22 +242,20 @@ export function pooledGroups(
  * of groups that are pairwise not significantly different; letter sets contained in another are dropped.
  */
 export function groupingLetters(stats: GroupStats[], differ: Set<string>): Map<string, string> {
-  const order = [...stats].sort((p, q) => q.mean - p.mean)
-  const sets: string[][] = []
-  for (let i = 0; i < order.length; i++) {
-    const set = [order[i]!.name]
-    for (let j = i + 1; j < order.length; j++) {
-      const cand = order[j]!.name
-      if (set.every((m) => !differ.has(`${m}\0${cand}`))) set.push(cand)
-      else break
-    }
-    if (!sets.some((s) => set.every((m) => s.includes(m)))) sets.push(set)
+  const order = [...stats].sort((p, q) => q.mean - p.mean).map((s) => s.name)
+  let sets = [order]
+  // Insert-and-absorb: every nonsignificant pair shares a letter, even when means
+  // are noncontiguous in their order (unequal SEs invalidate the old run heuristic).
+  for (let i = 0; i < order.length; i++) for (let j = i + 1; j < order.length; j++) {
+    const a = order[i]!, b = order[j]!
+    if (!differ.has(`${a}\0${b}`) && !differ.has(`${b}\0${a}`)) continue
+    sets = sets.flatMap((set) => set.includes(a) && set.includes(b) ? [set.filter((v) => v !== a), set.filter((v) => v !== b)] : [set])
+    sets = sets.filter((set, idx) => !sets.some((other, jdx) => jdx !== idx && set.every((v) => other.includes(v)) && (other.length > set.length || jdx < idx)))
   }
+  sets.sort((a, b) => order.indexOf(a[0]!) - order.indexOf(b[0]!))
   const letterOf = new Map<string, string>()
-  sets.forEach((set, idx) => {
-    const letter = String.fromCharCode(65 + (idx % 26))
-    for (const m of set) letterOf.set(m, (letterOf.get(m) ?? '') + letter)
-  })
+  const label = (i: number) => { let s = ''; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + (i - 1) % 26) + s; return s }
+  sets.forEach((set, i) => { for (const name of set) letterOf.set(name, [letterOf.get(name), label(i)].filter(Boolean).join(' ')) })
   return letterOf
 }
 

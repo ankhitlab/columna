@@ -96,7 +96,7 @@ export function trapz(y: ArrayLike<number>, x?: ArrayLike<number> | number): num
   if (n < 2) return 0
   let s = 0
   if (x === undefined || typeof x === 'number') {
-    const dx = x ?? 1
+    const dx = typeof x === 'number' ? x : 1
     for (let i = 1; i < n; i++) s += 0.5 * (Number(y[i - 1]) + Number(y[i]))
     return s * dx
   }

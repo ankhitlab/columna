@@ -22,11 +22,14 @@ export interface SurvivalObs {
 
 function asObs(time: ArrayLike<number | null | undefined>, censor?: ArrayLike<number | null | undefined>, time2?: ArrayLike<number | null | undefined>): SurvivalObs[] {
   const t = Array.from(time)
+  if (censor && censor.length !== t.length || time2 && time2.length !== t.length) throw new RangeError('reliability: time/censor length mismatch')
   const out: SurvivalObs[] = []
   for (let i = 0; i < t.length; i++) {
     const ti = t[i]
     if (typeof ti !== 'number' || !Number.isFinite(ti) || ti < 0) continue
-    const c = censor ? Number(censor[i] ?? 0) : 0
+    if (censor && (censor[i] === null || censor[i] === undefined)) continue
+    const c = censor ? Number(censor[i]) : 0
+    if (![0, 1, 2, 3].includes(c)) throw new RangeError('reliability: unknown censor code')
     out.push({ time: ti, time2: time2 ? Number(time2[i]) : undefined, censor: (c as CensorCode) || 0 })
   }
   if (out.length < 3) throw new RangeError('reliability: need at least 3 observations')
@@ -467,6 +470,7 @@ export interface KaplanMeierPoint {
   se: number
   atRisk: number
   events: number
+  censored?: number
   lower: number
   upper: number
 }
@@ -482,44 +486,21 @@ export function kaplanMeier(
   time: ArrayLike<number | null | undefined>,
   options: { censor?: ArrayLike<number | null | undefined>; confidence?: number } = {},
 ): KaplanMeierResult {
-  const obs = asObs(time, options.censor)
-  const conf = options.confidence ?? 0.95
-  const z = STD.ppf(0.5 + conf / 2)
-  const times = [...new Set(obs.map((o) => o.time))].sort((a, b) => a - b)
-  const eventsAt = new Map<number, number>()
-  const censoredAt = new Map<number, number>()
-  for (const o of obs) {
-    if ((o.censor ?? 0) === 0) eventsAt.set(o.time, (eventsAt.get(o.time) ?? 0) + 1)
-    else if ((o.censor ?? 0) === 1) censoredAt.set(o.time, (censoredAt.get(o.time) ?? 0) + 1)
-  }
-  let atRisk = obs.length
-  let S = 1
-  let sumVar = 0
+  const obs = asObs(time, options.censor), conf = options.confidence ?? .95
+  if (!(conf > 0 && conf < 1)) throw new RangeError('kaplanMeier: confidence must be in (0,1)')
+  if (obs.some((o) => o.censor !== 0 && o.censor !== 1)) throw new RangeError('kaplanMeier: only exact and right-censored observations are supported')
+  const z = STD.ppf(.5 + conf / 2), events = new Map<number, { event: number; censor: number }>()
+  for (const o of obs) { const v = events.get(o.time) ?? { event: 0, censor: 0 }; if (o.censor === 1) v.censor++; else v.event++; events.set(o.time, v) }
+  let atRisk = obs.length, S = 1, sumVar = 0, nEvents = 0
   const curve: KaplanMeierPoint[] = []
-  let nEvents = 0
-  for (const t of times) {
-    const events = eventsAt.get(t) ?? 0
-    const censored = censoredAt.get(t) ?? 0
-    if (events > 0 && atRisk > 0) {
-      S *= 1 - events / atRisk
-      sumVar += events / (atRisk * (atRisk - events || 1e-12))
-      nEvents += events
-      const se = S * Math.sqrt(sumVar)
-      // log-log CI
-      let lower = 0
-      let upper = 1
-      if (S > 0 && S < 1 && se > 0) {
-        const theta = Math.log(-Math.log(S))
-        const seTheta = Math.sqrt(sumVar) / (Math.log(S) || 1e-12) // d/dS log(-log S) = 1/(S log S) * S... wait
-        // better: se of log(-log S) ≈ se / (S · |log S|)
-        const seLL = se / (S * Math.abs(Math.log(S)))
-        lower = Math.exp(-Math.exp(theta + z * seLL))
-        upper = Math.exp(-Math.exp(theta - z * seLL))
-        void seTheta
-      }
-      curve.push({ time: t, survival: S, se, atRisk, events, lower, upper })
-    }
-    atRisk -= events + censored
+  for (const time of [...events.keys()].sort((a, b) => a - b)) {
+    const e = events.get(time)!, risk = atRisk
+    if (e.event) { S *= 1 - e.event / risk; if (risk > e.event) sumVar += e.event / (risk * (risk - e.event)); nEvents += e.event }
+    const se = S === 0 ? 0 : S * Math.sqrt(sumVar)
+    let lower = S, upper = S
+    if (S > 0 && S < 1 && se > 0) { const theta = Math.log(-Math.log(S)), seLL = Math.sqrt(sumVar) / Math.abs(Math.log(S)); lower = Math.exp(-Math.exp(theta + z * seLL)); upper = Math.exp(-Math.exp(theta - z * seLL)) }
+    curve.push({ time, survival: S, se, atRisk: risk, events: e.event, censored: e.censor, lower, upper })
+    atRisk -= e.event + e.censor
   }
   return { curve, n: obs.length, nEvents }
 }
@@ -596,9 +577,9 @@ export interface LogRankResult {
   df: number
   pValue: number
   groups: string[]
-  /** Observed events per group. */
+  /** Weighted observed events per group; unweighted counts for log-rank. */
   observed: number[]
-  /** Expected events under H0 (Mantel–Haenszel). */
+  /** Correspondingly weighted expected events under H0 (Mantel–Haenszel). */
   expected: number[]
   n: number
   nEvents: number
@@ -645,7 +626,7 @@ function accumulateLogRank(
     for (let j = 0; j < K; j++) atRisk[j]! -= leavingByGroup[j]!
     nRisk -= leaving
     idx = end
-    if (d < 1 || nRiskNow < 2) continue
+    if (d < 1) continue
     {
       const nRisk = nRiskNow
       const atRisk = atRiskNow
@@ -675,7 +656,8 @@ function chi2FromOE(O: number[], E: number[], V: number[][]): { statistic: numbe
   let statistic = 0
   if (K === 2) {
     const diff = O[0]! - E[0]!
-    const v = Math.max(V[0]![0]!, 1e-300)
+    const v = V[0]![0]!
+    if (!(v > 0)) throw new RangeError('logRank: no positive event-risk variance; comparison is not estimable')
     statistic = (diff * diff) / v
   } else {
     const dim = K - 1
@@ -687,7 +669,7 @@ function chi2FromOE(O: number[], E: number[], V: number[][]): { statistic: numbe
       for (let r = col + 1; r < dim; r++) if (Math.abs(Aug[r]![col]!) > Math.abs(Aug[piv]![col]!)) piv = r
       ;[Aug[col], Aug[piv]] = [Aug[piv]!, Aug[col]!]
       const d0 = Aug[col]![col]!
-      if (Math.abs(d0) < 1e-14) continue
+      if (Math.abs(d0) < Number.EPSILON * 32 * dim * Math.max(...V.map((row, j) => Math.abs(row[j]!)))) throw new RangeError('logRank: singular event-risk covariance')
       for (let j = col; j <= dim; j++) Aug[col]![j]! /= d0
       for (let r = 0; r < dim; r++) {
         if (r === col) continue
@@ -715,6 +697,8 @@ export function logRank(
   } = {},
 ): LogRankResult {
   const weight = options.weight ?? 'logrank'
+  if (!['logrank', 'wilcoxon', 'tarone-ware'].includes(weight)) throw new RangeError('logRank: unsupported weighting')
+  if (options.censor && options.censor.length !== time.length || options.strata && options.strata.length !== time.length) throw new RangeError('logRank: censor / strata length mismatch')
   const tArr = Array.from(time)
   const gArr = Array.from(group)
   if (tArr.length !== gArr.length) throw new RangeError('logRank: time/group length mismatch')
@@ -724,7 +708,9 @@ export function logRank(
     const gi = gArr[i]
     if (typeof ti !== 'number' || !Number.isFinite(ti) || ti < 0) continue
     if (gi === null || gi === undefined || gi === '') continue
-    const c = options.censor ? Number(options.censor[i] ?? 0) : 0
+    if (options.censor && (options.censor[i] === null || options.censor[i] === undefined)) continue
+    const c = options.censor ? options.censor[i] : 0
+    if (c !== 0 && c !== 1) throw new RangeError('logRank: codes must be 0 = failure or 1 = right censored')
     const st = options.strata ? String(options.strata[i] ?? '') : ''
     rows.push({ time: ti, group: String(gi), event: c === 0, stratum: st })
   }
@@ -760,7 +746,7 @@ export function logRank(
     observed: O,
     expected: E,
     n: rows.length,
-    nEvents: O.reduce((a, b) => a + b, 0),
+    nEvents: rows.filter(row => row.event).length,
     weight,
     stratified: strataKeys.length > 1 || (strataKeys.length === 1 && strataKeys[0] !== ''),
   }

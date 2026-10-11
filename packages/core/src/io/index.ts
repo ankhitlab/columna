@@ -38,9 +38,26 @@ export { loadBytes, loadText, resolveSource, setIoPolicy, getIoPolicy, io } from
 export { parseCsvToTable, streamCsvFileToTable, CsvTableBuilder, CsvRecordSplitter } from './csv-columnar.js'
 export { readSqlRows, openSqlClient, inferDialectFromUrl, normalizeDialect } from './sql/index.js'
 export { readKafkaRows, parseKafkaUrl, messageToRow, flattenObject, decodePayload } from './kafka/index.js'
-export { tableToCsv, writeCsvText, tableToParquetLike, writeParquetBytes, writeParquetLikeBytes, type CsvWriteOptions } from './write.js'
+export {
+  tableToCsv,
+  writeCsvText,
+  tableToParquetLike,
+  tableToParquetBytes,
+  writeParquetBytes,
+  writeParquetLikeBytes,
+  tableToJson,
+  writeJsonText,
+  tableToExcelBytes,
+  writeExcelBytes,
+  projectTable,
+  type CsvWriteOptions,
+  type ParquetWriteOptions,
+  type ParquetLikeWriteOptions,
+  type JsonWriteOptions,
+  type ExcelWriteOptions,
+} from './write.js'
 export { tableToMarkdown, tableToHtml, profileTable } from './present.js'
-export type { ProfileReport } from './present.js'
+export type { PresentWriteOptions, ProfileReport } from './present.js'
 
 export async function readCsvRows(source: IoSource, options: ReadCsvOptions = {}): Promise<Record<string, unknown>[]> {
   const text = await loadText(source, options)

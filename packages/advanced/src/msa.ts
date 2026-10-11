@@ -33,6 +33,8 @@ export interface GageComponent {
   ms?: number
   F?: number
   pValue?: number
+  studyVariation?: number
+  pctTolerance?: number
 }
 
 export interface GageRRResult {
@@ -51,6 +53,9 @@ export interface GageRRResult {
   sigmaTotal: number
   /** Number of distinct categories ≈ 1.41 · σ_part / σ_GRR */
   ndc: number
+  anova?: Array<{ source: string; ss: number; df: number; ms: number; F?: number; pValue?: number }>
+  interactionPooled?: boolean
+  warnings?: string[]
 }
 
 type Row = { part: string; operator: string; y: number }
@@ -74,207 +79,72 @@ function parseGage(
 
 /**
  * Gage R&R by the ANOVA method (AIAG MSA / Minitab).
- * Crossed: Part × Operator with replicates. Nested: Operator(Part) when each part is measured
- * by only one operator (pass `design: 'nested'`).
+ * Crossed: Part × Operator with replicates. Nested: Part(Operator) when each part is measured
+ * by only one operator (pass `design: 'nested'`). Balanced designs only; nested model is Part(Operator).
  */
 export function gageRR(
-  data: {
-    part: ArrayLike<string | number | null>
-    operator?: ArrayLike<string | number | null>
-    measurement: ArrayLike<number | null | undefined>
-  },
-  options: { design?: 'crossed' | 'nested'; alpha?: number } = {},
+  data: { part: ArrayLike<string | number | null>; operator?: ArrayLike<string | number | null>; measurement: ArrayLike<number | null | undefined> },
+  options: { design?: 'crossed' | 'nested'; alpha?: number; interaction?: 'keep' | 'pool' | 'auto'; tolerance?: number; studyMultiplier?: number } = {},
 ): GageRRResult {
-  const rows = parseGage(data)
-  const design = options.design ?? 'crossed'
-  const parts = [...new Set(rows.map((r) => r.part))].sort()
-  const operators = [...new Set(rows.map((r) => r.operator))].sort()
-  const p = parts.length
-  const o = operators.length
-  const grand = meanOf(rows.map((r) => r.y))
-  const N = rows.length
-
-  // replicates per part×operator cell
-  const cellKey = (part: string, op: string) => `${part}\0${op}`
-  const cells = new Map<string, number[]>()
-  for (const r of rows) {
-    const k = cellKey(r.part, r.operator)
-    let arr = cells.get(k)
-    if (!arr) cells.set(k, (arr = []))
-    arr.push(r.y)
+  const rows = parseGage(data), design = options.design ?? 'crossed', alpha = options.alpha ?? .05
+  const mode = options.interaction ?? 'keep', k = options.studyMultiplier ?? 6
+  if (!['crossed', 'nested'].includes(design) || !['keep', 'pool', 'auto'].includes(mode)) throw new RangeError('gageRR: invalid design or interaction mode')
+  if (!(alpha > 0 && alpha < 1) || !(k > 0) || !Number.isFinite(k)) throw new RangeError('gageRR: invalid alpha / study multiplier')
+  if (options.tolerance !== undefined && (!(options.tolerance > 0) || !Number.isFinite(options.tolerance))) throw new RangeError('gageRR: tolerance must be positive and finite')
+  const ops = [...new Set(rows.map((r) => r.operator))].sort(), parts = [...new Set(rows.map((r) => r.part))].sort()
+  const o = ops.length, cells = new Map<string, number[]>(), byOp = new Map<string, Row[]>()
+  const key = (part: string, op: string) => JSON.stringify([op, part])
+  for (const row of rows) {
+    const id = key(row.part, row.operator); const c = cells.get(id) ?? []; c.push(row.y); cells.set(id, c)
+    const rr = byOp.get(row.operator) ?? []; rr.push(row); byOp.set(row.operator, rr)
   }
-  const reps = [...cells.values()].map((c) => c.length)
-  const r = Math.min(...reps)
-  if (reps.some((n) => n !== r)) {
-    // unbalanced — still use ANOVA with cell means; require at least 1
+  const reps = [...cells.values()].map((r) => r.length), r = reps[0]!
+  if (o < 2 || r < 2 || reps.some((n) => n !== r)) throw new RangeError('gageRR: balanced data require at least two operators and two equal replicates in every cell')
+  const counts = ops.map((op) => new Set(byOp.get(op)!.map((r) => r.part)).size)
+  const p = design === 'crossed' ? parts.length : counts[0]!
+  if (p < 2 || counts.some((n) => n !== p) || design === 'crossed' && cells.size !== p * o) throw new RangeError('gageRR: complete balanced crossed or nested part/operator design required')
+  const N = rows.length, grand = meanOf(rows.map((r) => r.y)), ssTotal = ssOf(rows.map((r) => r.y), grand)
+  const ssE = [...cells.values()].reduce((s, x) => s + ssOf(x), 0), dfE = o * p * (r - 1), msE = ssE / dfE
+  const ssO = ops.reduce((s, op) => s + p * r * (meanOf(byOp.get(op)!.map((a) => a.y)) - grand) ** 2, 0), dfO = o - 1, msO = ssO / dfO
+  const anova: NonNullable<GageRRResult['anova']> = [], warnings: string[] = []
+  const pv = (F: number, d1: number, d2: number) => F === Infinity ? 0 : Number.isFinite(F) ? fDist(d1, d2).sf(Math.max(0, F)) : NaN
+  const add = (source: string, ss: number, df: number, denominator?: number, dfDen?: number) => {
+    const ms = ss / df, F = denominator === undefined ? undefined : denominator > 0 ? ms / denominator : ms > 0 ? Infinity : NaN
+    anova.push({ source, ss, df, ms, F, pValue: F === undefined ? undefined : pv(F, df, dfDen!) })
   }
-  const nRep = r
-
-  // Sums of squares
-  const partMeans = new Map<string, number>()
-  const opMeans = new Map<string, number>()
-  for (const part of parts) {
-    const ys = rows.filter((row) => row.part === part).map((row) => row.y)
-    partMeans.set(part, meanOf(ys))
-  }
-  for (const op of operators) {
-    const ys = rows.filter((row) => row.operator === op).map((row) => row.y)
-    opMeans.set(op, meanOf(ys))
-  }
-
-  let ssPart = 0
-  for (const part of parts) {
-    const nPart = rows.filter((row) => row.part === part).length
-    ssPart += nPart * (partMeans.get(part)! - grand) ** 2
-  }
-  let ssOp = 0
-  for (const op of operators) {
-    const nOp = rows.filter((row) => row.operator === op).length
-    ssOp += nOp * (opMeans.get(op)! - grand) ** 2
-  }
-
-  let ssCell = 0
-  for (const [, ys] of cells) {
-    const cm = meanOf(ys)
-    ssCell += ys.length * (cm - grand) ** 2
-  }
-  const ssPO = ssCell - ssPart - ssOp // interaction (crossed)
-  let ssE = 0
-  for (const [, ys] of cells) ssE += ssOf(ys)
-  const ssTotal = ssOf(rows.map((row) => row.y), grand)
-
-  const dfPart = p - 1
-  const dfOp = o - 1
-  const dfPO = design === 'crossed' ? (p - 1) * (o - 1) : 0
-  const dfE = N - cells.size
-  const dfTotal = N - 1
-
-  const msPart = ssPart / dfPart
-  const msOp = o > 1 ? ssOp / dfOp : 0
-  const msPO = design === 'crossed' && dfPO > 0 ? ssPO / dfPO : 0
-  const msE = dfE > 0 ? ssE / dfE : 0
-
-  // Variance components (AIAG balanced crossed formulas; use average replicates)
-  const n = nRep
-  const varE = Math.max(0, msE)
-  let varPO = 0
-  let varOp = 0
-  let varPart = 0
-
+  let varE = msE, varO = 0, varP = 0, varPO = 0, pooled = false
   if (design === 'crossed') {
-    varPO = Math.max(0, (msPO - msE) / n)
-    varOp = Math.max(0, (msOp - msPO) / (p * n))
-    varPart = Math.max(0, (msPart - msPO) / (o * n))
+    const partMeans = new Map(parts.map((part) => [part, meanOf(rows.filter((x) => x.part === part).map((x) => x.y))]))
+    const opMeans = new Map(ops.map((op) => [op, meanOf(byOp.get(op)!.map((x) => x.y))]))
+    const ssP = parts.reduce((s, part) => s + o * r * (partMeans.get(part)! - grand) ** 2, 0)
+    const ssPO = parts.reduce((s, part) => s + ops.reduce((v, op) => v + r * (meanOf(cells.get(key(part, op))!) - partMeans.get(part)! - opMeans.get(op)! + grand) ** 2, 0), 0)
+    const dfP = p - 1, dfPO = (p - 1) * (o - 1), msP = ssP / dfP, msPO = ssPO / dfPO
+    const Fpo = msE > 0 ? msPO / msE : msPO > 0 ? Infinity : NaN
+    pooled = mode === 'pool' || mode === 'auto' && pv(Fpo, dfPO, dfE) >= alpha
+    if (pooled) {
+      varE = (ssE + ssPO) / (dfE + dfPO); varO = (msO - varE) / (p * r); varP = (msP - varE) / (o * r)
+      add('Part', ssP, dfP, varE, dfE + dfPO); add('Operator', ssO, dfO, varE, dfE + dfPO)
+      add('Repeatability (pooled)', ssE + ssPO, dfE + dfPO)
+      warnings.push('The part × operator interaction was pooled into repeatability; this assumes no interaction.')
+    } else {
+      varPO = (msPO - msE) / r; varO = (msO - msPO) / (p * r); varP = (msP - msPO) / (o * r)
+      add('Part', ssP, dfP, msPO, dfPO); add('Operator', ssO, dfO, msPO, dfPO); add('Part × Operator', ssPO, dfPO, msE, dfE); add('Repeatability', ssE, dfE)
+    }
   } else {
-    // Nested: Part / Operator(Part) — Operator SS includes interaction
-    const msOpNested = (ssOp + ssPO) / Math.max(1, dfOp + dfPO)
-    varOp = Math.max(0, (msOpNested - msE) / n)
-    varPart = Math.max(0, (msPart - msOpNested) / (o * n))
-    varPO = 0
+    const ssP = ops.reduce((s, op) => s + [...new Set(byOp.get(op)!.map((x) => x.part))].reduce((v, part) => v + r * (meanOf(cells.get(key(part, op))!) - meanOf(byOp.get(op)!.map((x) => x.y))) ** 2, 0), 0)
+    const dfP = o * (p - 1), msP = ssP / dfP
+    varP = (msP - msE) / r; varO = (msO - msP) / (p * r)
+    add('Operator', ssO, dfO, msP, dfP); add('Part (Operator)', ssP, dfP, msE, dfE); add('Repeatability', ssE, dfE)
+    warnings.push('Nested parts are local to each operator: identical part labels across operators denote different physical parts.')
   }
-
-  const varReprod = varOp + varPO
-  const varGRR = varE + varReprod
-  const varTotal = varGRR + varPart
-  const sigmaRepeat = Math.sqrt(varE)
-  const sigmaReprod = Math.sqrt(varReprod)
-  const sigmaGageRR = Math.sqrt(varGRR)
-  const sigmaPart = Math.sqrt(varPart)
-  const sigmaTotal = Math.sqrt(varTotal)
-
-  const pct = (v: number) => (varTotal > 0 ? (100 * v) / varTotal : 0)
-  const pctS = (s: number) => (sigmaTotal > 0 ? (100 * s) / sigmaTotal : 0)
-
-  const F_ = (ms: number, mse: number) => (mse > 0 ? ms / mse : Infinity)
-  const pF = (Fstat: number, d1: number, d2: number) => (d2 > 0 && Number.isFinite(Fstat) ? fDist(d1, d2).sf(Fstat) : NaN)
-
-  const components: GageComponent[] = [
-    {
-      name: 'Total Gage R&R',
-      variance: varGRR,
-      stdDev: sigmaGageRR,
-      pctContribution: pct(varGRR),
-      pctStudyVar: pctS(sigmaGageRR),
-    },
-    {
-      name: 'Repeatability',
-      variance: varE,
-      stdDev: sigmaRepeat,
-      pctContribution: pct(varE),
-      pctStudyVar: pctS(sigmaRepeat),
-      df: dfE,
-      ms: msE,
-    },
-    {
-      name: 'Reproducibility',
-      variance: varReprod,
-      stdDev: sigmaReprod,
-      pctContribution: pct(varReprod),
-      pctStudyVar: pctS(sigmaReprod),
-    },
-  ]
-  if (o > 1) {
-    components.push({
-      name: 'Operator',
-      variance: varOp,
-      stdDev: Math.sqrt(varOp),
-      pctContribution: pct(varOp),
-      pctStudyVar: pctS(Math.sqrt(varOp)),
-      df: dfOp,
-      ms: msOp,
-      F: F_(msOp, design === 'crossed' ? msPO || msE : msE),
-      pValue: pF(F_(msOp, design === 'crossed' ? msPO || msE : msE), dfOp, design === 'crossed' ? dfPO || dfE : dfE),
-    })
-  }
-  if (design === 'crossed' && o > 1) {
-    components.push({
-      name: 'Operator×Part',
-      variance: varPO,
-      stdDev: Math.sqrt(varPO),
-      pctContribution: pct(varPO),
-      pctStudyVar: pctS(Math.sqrt(varPO)),
-      df: dfPO,
-      ms: msPO,
-      F: F_(msPO, msE),
-      pValue: pF(F_(msPO, msE), dfPO, dfE),
-    })
-  }
-  components.push({
-    name: 'Part-to-Part',
-    variance: varPart,
-    stdDev: sigmaPart,
-    pctContribution: pct(varPart),
-    pctStudyVar: pctS(sigmaPart),
-    df: dfPart,
-    ms: msPart,
-    F: F_(msPart, design === 'crossed' ? msPO || msE : msE),
-    pValue: pF(F_(msPart, design === 'crossed' ? msPO || msE : msE), dfPart, design === 'crossed' ? dfPO || dfE : dfE),
-  })
-  components.push({
-    name: 'Total Variation',
-    variance: varTotal,
-    stdDev: sigmaTotal,
-    pctContribution: 100,
-    pctStudyVar: 100,
-    df: dfTotal,
-    ms: ssTotal / dfTotal,
-  })
-
-  const ndc = sigmaGageRR > 0 ? Math.max(1, Math.floor(1.41 * (sigmaPart / sigmaGageRR))) : Infinity
-  void options.alpha
-  return {
-    design,
-    nParts: p,
-    nOperators: o,
-    nReplicates: nRep,
-    components,
-    sigmaRepeat,
-    sigmaReprod,
-    sigmaGageRR,
-    sigmaPart,
-    sigmaTotal,
-    ndc: Number.isFinite(ndc) ? ndc : 0,
-  }
+  if ([varO, varP, varPO].some((v) => v < 0)) warnings.push('Negative ANOVA variance-component estimates were truncated at zero.')
+  varO = Math.max(0, varO); varP = Math.max(0, varP); varPO = Math.max(0, varPO)
+  const vRepro = varO + varPO, vRR = varE + vRepro, vTotal = vRR + varP
+  if (!(vTotal > 0) || !Number.isFinite(vTotal)) throw new RangeError('gageRR: total estimated variance is zero or non-finite')
+  const component = (name: string, variance: number): GageComponent => ({ name, variance, stdDev: Math.sqrt(variance), pctContribution: 100 * variance / vTotal, pctStudyVar: 100 * Math.sqrt(variance / vTotal), studyVariation: k * Math.sqrt(variance), pctTolerance: options.tolerance === undefined ? undefined : 100 * k * Math.sqrt(variance) / options.tolerance })
+  const components = [component('Total Gage R&R', vRR), component('Repeatability', varE), component('Reproducibility', vRepro), component('Operator', varO), ...(design === 'crossed' && !pooled ? [component('Part × Operator', varPO)] : []), component('Part-to-Part', varP), component('Total Variation', vTotal)]
+  add('Total', ssTotal, N - 1)
+  return { design, nParts: design === 'nested' ? p * o : p, nOperators: o, nReplicates: r, components, sigmaRepeat: Math.sqrt(varE), sigmaReprod: Math.sqrt(vRepro), sigmaGageRR: Math.sqrt(vRR), sigmaPart: Math.sqrt(varP), sigmaTotal: Math.sqrt(vTotal), ndc: vRR > 0 ? Math.max(1, Math.floor(1.41 * Math.sqrt(varP / vRR))) : Infinity, anova, interactionPooled: pooled, warnings }
 }
 
 export interface GageLinearityResult {

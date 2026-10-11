@@ -132,13 +132,25 @@ export function trendAnalysis(
       const r = new Float64Array(n)
       for (let i = 0; i < n; i++) {
         const tt = t[i]!
-        const den = 1 + b * Math.exp(-c * tt)
+        const e = Math.exp(-c * tt)
+        const den = 1 + b * e
         const fit = a / den
         r[i] = v[i]! - fit
-        const e = Math.exp(-c * tt)
         J.data[i * 3] = 1 / den
         J.data[i * 3 + 1] = (-a * e) / (den * den)
         J.data[i * 3 + 2] = (a * b * tt * e) / (den * den)
+        // Large |c·t| can overflow exp/Jacobian; drop the row so lstsq stays finite.
+        if (
+          !Number.isFinite(r[i]!) ||
+          !Number.isFinite(J.data[i * 3]!) ||
+          !Number.isFinite(J.data[i * 3 + 1]!) ||
+          !Number.isFinite(J.data[i * 3 + 2]!)
+        ) {
+          r[i] = 0
+          J.data[i * 3] = 0
+          J.data[i * 3 + 1] = 0
+          J.data[i * 3 + 2] = 0
+        }
       }
       const step = lstsq(J, r).coef
       a += step[0]!
@@ -206,7 +218,7 @@ export function decompose(
   // centred MA of length s
   const trend = new Array<number>(n).fill(NaN)
   const half = Math.floor(s / 2)
-  for (let i = half; i < n - half + (s % 2 === 0 ? 0 : 1); i++) {
+  for (let i = half; i < n - half; i++) {
     if (s % 2 === 1) {
       let sum = 0
       for (let k = -half; k <= half; k++) sum += v[i + k]!
@@ -240,7 +252,7 @@ export function decompose(
     for (let k = 0; k < s; k++) seasonalIndices[k] /= m || 1
   }
   const seasonal = Array.from({ length: n }, (_, i) => seasonalIndices[i % s]!)
-  const residual = v.map((yi, i) => (method === 'additive' ? yi - (trend[i]! || 0) - seasonal[i]! : yi / ((trend[i]! || 1) * seasonal[i]!)))
+  const residual = v.map((yi, i) => Number.isFinite(trend[i]!) ? method === 'additive' ? yi - trend[i]! - seasonal[i]! : yi / (trend[i]! * seasonal[i]!) : NaN)
   return { method, seasonLength: s, trend, seasonal, residual, seasonalIndices }
 }
 
@@ -765,10 +777,12 @@ export function acf(y: ArrayLike<number | null | undefined>, options: { maxLag?:
   if (n < 3) throw new RangeError('acf needs at least 3 observations')
   const maxLag = options.maxLag ?? Math.min(40, Math.floor(n / 2))
   const conf = options.confidence ?? 0.95
+  if (!Number.isInteger(maxLag) || maxLag < 1 || maxLag >= n || !(conf > 0 && conf < 1)) throw new RangeError('acf: 1 ≤ maxLag < n and confidence in (0,1) required')
   const z = STD.ppf(0.5 + conf / 2)
   const m = meanOf(v)
   let c0 = 0
   for (const yi of v) c0 += (yi - m) ** 2
+  if (!(c0 > 0)) throw new RangeError('acf: nonconstant series required')
   const lag: number[] = []
   const rho: number[] = []
   for (let k = 0; k <= maxLag; k++) {
@@ -978,7 +992,8 @@ export function ljungBox(y: ArrayLike<number | null | undefined>, options: { lag
   let q = 0
   for (let k = 1; k <= h; k++) q += (a.acf[k]! * a.acf[k]!) / (n - k)
   q *= n * (n + 2)
-  const df = Math.max(1, h - (options.df ?? 0))
+  const df = h - (options.df ?? 0)
+  if (!Number.isInteger(df) || !(df > 0)) throw new RangeError('ljungBox: lags must exceed fitted model degrees of freedom')
   return { statistic: q, df, pValue: chi2Dist(df).sf(q), lags: h }
 }
 
@@ -1746,6 +1761,10 @@ export function arima(
   const sigma = Math.sqrt(best.sigma2)
   // Approximate ψ using nonseasonal ARMA only (seasonal contribution omitted in PI MVP)
   const psi = armaPsi(best.ar, best.ma, Math.max(1, horizon))
+  // Integrate impulse responses too: differenced-series uncertainty is not level uncertainty.
+  for (let pass = 0; pass < d; pass++) for (let j = 1; j < psi.length; j++) psi[j]! += psi[j - 1]!
+  for (let pass = 0; pass < D; pass++) for (let j = period; j < psi.length; j++) psi[j]! += psi[j - period]!
+
   let forecastLower: number[] | undefined
   let forecastUpper: number[] | undefined
   if (horizon > 0) {
@@ -1780,8 +1799,9 @@ export function arima(
     pValue: pValues,
     ci,
     sigma2: best.sigma2,
-    fitted: best.fitted,
-    residuals: best.resid,
+    // Innovations on the differenced scale are also one-step level errors. Keep raw indexing.
+    fitted: raw.map((v, j) => j < raw.length - best.resid.length ? NaN : v - best.resid[j - (raw.length - best.resid.length)]!),
+    residuals: raw.map((_, j) => j < raw.length - best.resid.length ? NaN : best.resid[j - (raw.length - best.resid.length)]!),
     forecast,
     forecastLower,
     forecastUpper,

@@ -18,6 +18,7 @@
  */
 import {
   PrecisionLossError,
+  getColumn,
   isSafeBigInt,
   isValid,
   setValid,
@@ -284,6 +285,8 @@ export interface ArrowIpcWriteOptions {
   format?: 'stream' | 'file'
   /** Split the table into record batches of this many rows (default: one batch). */
   batchRows?: number
+  /** Subset of columns to write, in order. */
+  columns?: string[]
 }
 
 interface EncodedBuffers {
@@ -526,6 +529,9 @@ function encapsulate(meta: Uint8Array, body: EncodedBuffers | null): Uint8Array 
  * Serialize a table as Apache Arrow IPC bytes. See the module comment for the type mapping.
  */
 export function toArrowIpc(table: TableView, options: ArrowIpcWriteOptions = {}): Uint8Array {
+  if (options.columns && options.columns.length > 0) {
+    table = tableFromColumns(options.columns.map((name) => getColumn(table, name)))
+  }
   const format = options.format ?? 'stream'
   const batchRows = options.batchRows && options.batchRows > 0 ? Math.floor(options.batchRows) : table.numRows
   const dictIds = new Map<string, number>()

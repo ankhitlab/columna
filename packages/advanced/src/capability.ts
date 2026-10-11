@@ -63,6 +63,13 @@ export interface CapabilityResult {
   /** Approximate CI for Cpk (Bissell / Chou–Owen–Borrego normal approx). */
   cpkCI?: [number, number]
   confidence: number
+  withinDF?: number
+  countBelow?: number
+  countAbove?: number
+  observed?: { below: number; above: number; total: number }
+  within?: { below: number; above: number; total: number }
+  overall?: { below: number; above: number; total: number }
+  intervals?: { Cp: [number, number] | null; Cpk: [number, number]; Pp: [number, number] | null; Ppk: [number, number] }
 }
 
 function ppmNormal(mean: number, sigma: number, lsl?: number, usl?: number): number {
@@ -85,10 +92,16 @@ export function capability(
     target?: number
     subgroup?: number
     method?: 'r' | 's'
+    /** Explicit within sigma from an independently fitted process estimator. */
+    sigmaWithin?: number
+    /** Effective DF for approximate within-sigma confidence intervals. */
+    withinDF?: number
     confidence?: number
   } = {},
 ): CapabilityResult {
   const { lsl, usl } = options
+  if ([lsl, usl, options.target].some((v) => v !== undefined && !Number.isFinite(v))) throw new RangeError('capability: finite specification limits required')
+  if (options.sigmaWithin !== undefined && !(Number.isFinite(options.sigmaWithin) && options.sigmaWithin > 0)) throw new RangeError('capability: sigmaWithin must be finite and positive')
   if (lsl === undefined && usl === undefined) throw new RangeError('capability: provide lsl and/or usl')
   if (lsl !== undefined && usl !== undefined && !(usl > lsl)) throw new RangeError('capability: usl must be > lsl')
   const confidence = options.confidence ?? 0.95
@@ -102,7 +115,9 @@ export function capability(
   const sigmaOverall = sdOf(flat, 1)
 
   let sigmaWithin: number
-  if (groups.length >= 2 && groups.every((g) => g.length >= 2)) {
+  if (options.sigmaWithin !== undefined) {
+    sigmaWithin = options.sigmaWithin
+  } else if (groups.length >= 2 && groups.every((g) => g.length >= 2)) {
     const useS = options.method === 's'
     const ns = groups.map((g) => g.length)
     const equal = ns.every((ni) => ni === ns[0])
@@ -119,8 +134,17 @@ export function capability(
       sigmaWithin = s / groups.length
     }
   } else {
-    sigmaWithin = sigmaOverall
+    // Individuals: retain source adjacency; missing observations do not form moving ranges.
+    const source = Array.isArray(x) && Array.isArray(x[0]) ? flat : Array.from(x as ArrayLike<number | null | undefined>)
+    const mr: number[] = []
+    for (let i = 1; i < source.length; i++) {
+      const a = source[i - 1], b = source[i]
+      if (typeof a === 'number' && typeof b === 'number' && Number.isFinite(a) && Number.isFinite(b)) mr.push(Math.abs(b - a))
+    }
+    if (!mr.length) throw new RangeError('capability: need adjacent observations for within sigma')
+    sigmaWithin = meanOf(mr) / spcConstants(2).d2
   }
+  if (!(sigmaWithin > 0) || !(sigmaOverall > 0)) throw new RangeError('capability: zero variation does not establish infinite capability')
 
   const target = options.target
   const out: CapabilityResult = { n, mean, sigmaWithin, sigmaOverall, lsl, usl, target, confidence }
@@ -162,6 +186,29 @@ export function capability(
     const z = STD.ppf(0.5 + confidence / 2)
     out.cpkCI = [out.Cpk - z * se, out.Cpk + z * se]
   }
+  const tails = (sigma: number) => {
+    const below = lsl === undefined ? 0 : STD.cdf((lsl - mean) / sigma) * 1e6
+    const above = usl === undefined ? 0 : STD.sf((usl - mean) / sigma) * 1e6
+    return { below, above, total: below + above }
+  }
+  out.countBelow = lsl === undefined ? 0 : flat.filter((v) => v < lsl).length
+  out.countAbove = usl === undefined ? 0 : flat.filter((v) => v > usl).length
+  out.observed = { below: out.countBelow / n * 1e6, above: out.countAbove / n * 1e6, total: (out.countBelow + out.countAbove) / n * 1e6 }
+  out.within = tails(sigmaWithin)
+  out.overall = tails(sigmaOverall)
+  out.zBench = STD.isf(Math.min(1, out.overall.total / 1e6))
+  const df = options.withinDF ?? n - 1
+  if (!(Number.isFinite(df) && df > 0)) throw new RangeError('capability: withinDF must be finite and positive')
+  const alpha = (1 - confidence) / 2
+  const ciCp = (cp: number | undefined, degrees: number): [number, number] | null => cp === undefined ? null : [cp * Math.sqrt(chi2Dist(degrees).ppf(alpha) / degrees), cp * Math.sqrt(chi2Dist(degrees).ppf(1 - alpha) / degrees)]
+  const ciCpk = (cpk: number, degrees: number): [number, number] => {
+    const se = Math.sqrt(1 / (9 * n) + cpk * cpk / (2 * degrees))
+    const half = STD.ppf(1 - alpha) * se
+    return [cpk - half, cpk + half]
+  }
+  out.withinDF = df
+  out.intervals = { Cp: ciCp(out.Cp, df), Cpk: ciCpk(out.Cpk!, df), Pp: ciCp(out.Pp, n - 1), Ppk: ciCpk(out.Ppk!, n - 1) }
+  out.cpkCI = out.intervals.Cpk
   return out
 }
 
