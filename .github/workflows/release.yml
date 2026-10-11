@@ -73,7 +73,8 @@ jobs:
         if: env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish release/columna-*.tgz --provenance --access public
+        # Leading ./ forces a local tarball path; without it npm treats "release/…" as a GitHub package spec.
+        run: npm publish "./release/columna-${VERSION}.tgz" --provenance --access public
 
       - name: npm publish skipped
         if: env.NPM_TOKEN == ''
