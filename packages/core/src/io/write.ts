@@ -12,7 +12,6 @@ function syncNodeRequire(id: string): unknown {
     /* fall through to CJS require */
   }
   // tsup CJS output has a free `require`; avoid referencing it as an identifier so ESM typecheck stays clean.
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-eval
   return (0, eval)('require')(id) as unknown
 }
 

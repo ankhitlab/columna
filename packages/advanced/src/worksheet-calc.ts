@@ -45,7 +45,7 @@ export function worksheetDateText(value:WorksheetValue,format='datetime'):string
 }
 interface Token {kind:string; value:string}
 export function compileWorksheetExpression(source:string,sheet:WorksheetData):WorksheetExpression {
- if(typeof source!=='string'||source.length>20000)fail('Слишком длинная формула.');let s=source.trim().replace(/^=/,''),p=0,tokens:Token[]=[]
+ if(typeof source!=='string'||source.length>20000)fail('Слишком длинная формула.');const s=source.trim().replace(/^=/,'');let p=0;const tokens:Token[]=[]
  while(p<s.length){const c=s[p];if(/\s/.test(c)){p++;continue}
   if(c==='"'||c==="'"){const quote=c;let v='',closed=false;p++;while(p<s.length){const k=s[p++];if(k===quote){if(s[p]===quote){v+=quote;p++;}else{closed=true;break}}else if(k==='\\'){const e=s[p++];if(e===undefined)fail('Незакрытая строка.');v+=e==='n'?'\n':e==='t'?'\t':e}else v+=k}if(!closed)fail('Незакрытая строка.');tokens.push({kind:'string',value:v});continue}
   if(c==='['){const end=s.indexOf(']',p+1);if(end<0)fail('Не закрыто имя в квадратных скобках.');tokens.push({kind:'ref',value:s.slice(p+1,end)});p=end+1;continue}

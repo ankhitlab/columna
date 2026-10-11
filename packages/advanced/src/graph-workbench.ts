@@ -41,7 +41,7 @@ export function graphWorkbench(o:GraphInput){
  if(!panels.length)throw new RangeError('Нет непустых панелей.')
  if(panels.length>50)throw new RangeError('Более 50 панелей. Создайте подмножество или выберите другую переменную панелей; данные не обрезаны.')
  if(o.kind==='scatter-matrix'&&(ys.length<2||ys.length>8))throw new RangeError('Матрица рассеяния: от 2 до 8 переменных.')
- let used=new Set<number>()
+ const used=new Set<number>()
  for(const [panel,rows]of panels){
   const suffix=o.panel?' · '+label(o.panel)+' = '+panel:'', by=groups(rows,o.group?o.data[o.group]:undefined)
   if(by.length>100)throw new RangeError('Более 100 групп графика; выберите другую группировку.')
