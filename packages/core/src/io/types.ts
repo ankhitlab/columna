@@ -108,7 +108,11 @@ export type ReadCsvOptions = IoLoadOptions & {
   thousands?: string
   /** Keep only these columns (names or 0-based indices). */
   usecols?: Array<string | number>
-  /** Force column dtypes after parse. */
+  /**
+   * Force column dtypes. For `utf8` / `category`, the original cell literal is kept
+   * (after CSV unquote) — not `String(Number(x))`. Leading zeros and a leading `+` are preserved.
+   * Other dtypes still coerce after the normal parse step.
+   */
   dtypes?: Record<string, DType>
 }
 

@@ -116,6 +116,10 @@ fields to null. Fix: writer emits `""`, reader keeps a quoted empty as `''`. Gua
 **Fused CSV scanner split records on newlines inside quotes** (`14f55eb`). A fast chunk scanner was not
 quote-aware. Guard: same, plus `csv-columnar.test.ts`.
 
+**CSV `dtypes.utf8` lost leading zeros / `+` phones**. Coerce ran `Number` before `String`, so `0070` became
+`"70"` and `+7900…` lost the plus. Fix: forced `utf8`/`category` skip numeric coerce; infer also leaves
+leading-zero integers and bare `+digits` as text. Guard: `csv-text-literals.test.ts`.
+
 **`fromRows` inferred dtypes from a 256-row sample** (`0fa6d84`). A late `2^31` in an i32 column wrapped; a late
 string in a numeric column threw. Fix: full-column inference with widening. Guard: browser smoke check "a late
 2^31 widens".

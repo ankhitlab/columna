@@ -1109,7 +1109,9 @@ fn parse_number(s: &[u8]) -> Option<ParsedField> {
   }
   let mut i = 0usize;
   let mut sign = 1f64;
+  let mut has_plus = false;
   if s[0] == b'+' {
+    has_plus = true;
     i = 1;
   } else if s[0] == b'-' {
     sign = -1.0;
@@ -1118,6 +1120,7 @@ fn parse_number(s: &[u8]) -> Option<ParsedField> {
   if i >= s.len() {
     return None;
   }
+  let digit_start = i;
   let mut int_digits = 0usize;
   let mut int_val = 0f64;
   while i < s.len() && s[i].is_ascii_digit() {
@@ -1129,6 +1132,14 @@ fn parse_number(s: &[u8]) -> Option<ParsedField> {
     return None;
   }
   if i >= s.len() {
+    // Match JS tryParsePlainNumberRange: bare +digits (phones) and multi-digit leading-zero
+    // integers (0070) stay text. +12.5 / sci still parse below. Lone 0 stays numeric.
+    if has_plus {
+      return None;
+    }
+    if int_digits > 1 && s[digit_start] == b'0' {
+      return None;
+    }
     if int_digits > 15 {
       let token = std::str::from_utf8(s).ok()?.to_string();
       let n: f64 = token.parse().ok()?;

@@ -25,6 +25,8 @@ export async function parseExcelToRows(
   const sheet = wb.Sheets[sheetName]
   if (!sheet) throw new Error(`Excel sheet missing: ${sheetName}`)
 
+  // raw:true keeps Excel text cells (format @ / leading apostrophe) as strings — no Number() round-trip.
+  // Numeric cells are already numbers in the file; CSV-style leading-zero recovery does not apply here.
   const matrix = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: null,
