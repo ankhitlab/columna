@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- CSV `dtypes: { col: 'utf8' | 'category' }` keeps the original cell literal (after unquote), instead of
+  `String(Number(x))`. Leading zeros (`0070`) and phone-style `+7900…` are preserved on both the columnar
+  and row readers. Contract: forced text is the cell literal, not a post-hoc stringification of a parsed number.
+- CSV infer no longer treats multi-digit leading-zero integers (`0070`, `037`) or bare `+digits` as numbers;
+  dates with separators (`05.02.2026`) and ordinary ints/floats are unchanged.
+- Native (Rayon) unquoted CSV parse applies the same leading-zero / `+digits` text rules as the JS path.
+- Excel reader documents that `raw: true` already keeps text-formatted cells (`@` / leading `'`); CSV-style
+  leading-zero recovery does not apply to cells Excel stored as numbers.
+
+### Docs
+
+- `ReadCsvOptions.dtypes` JSDoc and troubleshooting note for the former `0070` → `"70"` failure mode.
+- Probe script: `node scripts/probe-columna-dtypes.mjs` (after building `columna` / `@columna/core`).
+
 ## [0.5.0] - 2026-10-11
 
 ### Added

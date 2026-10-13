@@ -147,6 +147,17 @@ export type CoerceOptions = {
   thousands?: string
 }
 
+/**
+ * Forced `utf8` / `category`: keep the cell literal (after CSV unquote). Still maps nullTokens / blank → null.
+ * Does not run numeric / bool coerce — so `0070` and `+7900…` stay as written, not `String(Number(x))`.
+ */
+export function coerceTextValue(raw: string, opts: CoerceOptions): unknown {
+  const s = trimAscii(raw)
+  if (opts.nullValues.has(s) || (s !== s.toLowerCase() && opts.nullValues.has(s.toLowerCase()))) return null
+  if (s === '') return null
+  return raw
+}
+
 export function coerceValue(raw: string, opts: CoerceOptions): unknown {
   let s = trimAscii(raw)
   if (opts.nullValues.has(s) || (s !== s.toLowerCase() && opts.nullValues.has(s.toLowerCase()))) return null
@@ -161,6 +172,8 @@ export function coerceValue(raw: string, opts: CoerceOptions): unknown {
     if (num !== undefined) return num
     return s === '' ? null : raw
   }
+  // Leading '+' on a pure integer (+7900…) or a leading-zero integer (0070): keep as text.
+  if (/^\+\d+$/.test(s) || /^[+-]?0\d+$/.test(s)) return raw
   if (/^[+-]?\d+$/.test(s)) {
     const n = Number(s)
     // An integer beyond 2^53 cannot be held exactly in a JS number (there is no int64 dtype): keep the digits
@@ -196,14 +209,19 @@ export function tryParsePlainNumberRange(s: string, start: number, end: number):
   let i = start
   let sign = 1
   const c0 = s.charCodeAt(i)
+  let hasPlus = false
   if (c0 === 45) {
     sign = -1
     i++
-  } else if (c0 === 43) i++
+  } else if (c0 === 43) {
+    hasPlus = true
+    i++
+  }
   if (i >= end) return undefined
 
   let intDigits = 0
   let intVal = 0
+  const digitStart = i
   while (i < end) {
     const c = s.charCodeAt(i)
     if (c < 48 || c > 57) break
@@ -214,7 +232,13 @@ export function tryParsePlainNumberRange(s: string, start: number, end: number):
   if (intDigits === 0) return undefined
 
   if (i >= end) {
-    // integer, no fraction/exponent — avoid allocating a substring for safe ints
+    // Pure integer. Keep as text when:
+    // - leading '+' (phones like +7900…); explicit +12.5 / sci still parse below
+    // - multi-digit with a leading zero (0070 / 037); lone 0 / -0 stay numeric
+    // Dates like 05.02.2026 have non-digit separators and never reach this branch.
+    if (hasPlus) return undefined
+    if (intDigits > 1 && s.charCodeAt(digitStart) === 48) return undefined
+    // avoid allocating a substring for safe ints
     if (intDigits > 15) {
       const token = s.slice(start, end)
       const n = Number(token)
@@ -351,6 +375,7 @@ export function parseCsvToRows(csv: string, options: ReadCsvOptions = {}): Recor
   }
 
   const coerceOpts = { nullValues, trueValues, falseValues, decimal, thousands: options.thousands }
+  const forcedDtypes = options.dtypes
   const rows: Record<string, unknown>[] = []
   const limit = options.nRows
   for (let li = dataStart; li < filtered.length; li++) {
@@ -361,11 +386,18 @@ export function parseCsvToRows(csv: string, options: ReadCsvOptions = {}): Recor
     const idxs = usecolsIdx ?? headers.map((_, i) => i)
     for (const i of idxs) {
       const name = headers[i] ?? `column_${i}`
-      setRowField(row, name, coerceValue(cells[i] ?? '', coerceOpts))
+      const raw = cells[i] ?? ''
+      const forced = forcedDtypes?.[name]
+      // utf8/category: store the literal before any numeric coerce (dtypes must not be String(Number(x))).
+      setRowField(
+        row,
+        name,
+        forced === 'utf8' || forced === 'category' ? coerceTextValue(raw, coerceOpts) : coerceValue(raw, coerceOpts),
+      )
     }
     rows.push(row)
   }
 
-  if (options.dtypes) applyDtypes(rows, options.dtypes)
+  if (forcedDtypes) applyDtypes(rows, forcedDtypes)
   return rows
 }

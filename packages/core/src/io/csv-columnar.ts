@@ -5,7 +5,14 @@
  * fractional / out-of-Int32 / text value widens the column instead of being coerced.
  */
 import { setValue, tableFromColumns, type Column, type DType, type TableView } from '@columna/arrow'
-import { coerceValue, parseCsvLine, parseCsvLineInto, tryParsePlainNumberRange, type CoerceOptions } from './csv.js'
+import {
+  coerceTextValue,
+  coerceValue,
+  parseCsvLine,
+  parseCsvLineInto,
+  tryParsePlainNumberRange,
+  type CoerceOptions,
+} from './csv.js'
 import type { ReadCsvOptions } from './types.js'
 
 // ---- growable column builder -----------------------------------------------------------------------
@@ -369,10 +376,16 @@ export class CsvTableBuilder {
     for (let k = 0; k < this.colIdx.length; k++) {
       const b = this.builders[k]!
       const raw = cells[this.colIdx[k]!] ?? ''
-      // a quoted empty field ("") is an empty string, a bare empty field is null
-      let v = raw === '' && this.quotedBuf[this.colIdx[k]!] ? '' : coerceValue(raw, this.coerce)
       const forced = this.dtypes?.[b.name]
-      if (forced !== undefined && v !== null) v = coerceForced(v, forced)
+      // a quoted empty field ("") is an empty string, a bare empty field is null
+      const quotedEmpty = raw === '' && this.quotedBuf[this.colIdx[k]!]
+      let v: unknown
+      if (quotedEmpty) v = ''
+      else if (forced === 'utf8' || forced === 'category') v = coerceTextValue(raw, this.coerce)
+      else {
+        v = coerceValue(raw, this.coerce)
+        if (forced !== undefined && v !== null) v = coerceForced(v, forced)
+      }
       b.push(v)
     }
     this.rows++
@@ -429,6 +442,13 @@ export class CsvTableBuilder {
       b.pushNull()
       return
     }
+
+    // Forced text: keep the cell literal (untrimmed) — never Number() then String().
+    if (forced === 'utf8' || forced === 'category') {
+      b.pushText(line.slice(rawStart, rawEnd))
+      return
+    }
+
     const truth = isDefaultBoolRange(line, start, end)
     if (truth !== undefined) {
       if (forced !== undefined) b.push(coerceForced(truth, forced))
